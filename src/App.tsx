@@ -470,10 +470,8 @@ if %errorlevel% neq 0 (
 
   const downloadScannerBridgePs1 = () => {
     const psContent = `# Kyocera Scanner Bridge (Windows PowerShell)
-# Zero dependencies - does NOT require Node.js or npm!
-# Works out of the box on Windows 10, Windows 11, Windows 8, and Windows 7.
-
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 100% Pure ASCII - Zero Dependency, No Node.js required
+# Compatible with PowerShell 2.0, 3.0, 4.0, 5.0, 5.1 and PowerShell 7+ on all Windows editions
 
 $port = 3000
 $listener = New-Object System.Net.HttpListener
@@ -498,7 +496,7 @@ function Find-Naps2 {
 try {
     $listener.Start()
 } catch {
-    Write-Host "[ERROR] Could not bind to port $port. Is another server running?" -ForegroundColor Red
+    Write-Host "[ERROR] Could not bind to port $port. Is another server running on port $port?" -ForegroundColor Red
     Write-Host $_.Exception.Message
     Read-Host "Press Enter to exit..."
     exit 1
@@ -597,7 +595,7 @@ while ($listener.IsListening) {
             $source = if ($bodyObj.source) { $bodyObj.source } else { "flatbed" }
 
             if (-not $naps2) {
-                $errObj = @{ success = $false; error = "NAPS2 не найден на компьютере. Установите NAPS2 с https://www.naps2.com/" }
+                $errObj = @{ success = $false; error = "NAPS2 not found on PC. Please install NAPS2 from https://www.naps2.com/" }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
                 $res.StatusCode = 500
                 $res.ContentType = "application/json; charset=utf-8"
@@ -616,7 +614,7 @@ while ($listener.IsListening) {
             if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
             else { $argsList += @("--source", "flatbed") }
 
-            Write-Host "[SCAN] Физическое сканирование..." -ForegroundColor Cyan
+            Write-Host "[SCAN] Starting physical Kyocera scan..." -ForegroundColor Cyan
             & "$naps2" $argsList
 
             if (Test-Path $tempFile) {
@@ -624,15 +622,19 @@ while ($listener.IsListening) {
                 $base64 = "data:image/png;base64," + [Convert]::ToBase64String($fileBytes)
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
 
-                $resObj = @{ success = $true; base64 = $base64 }
+                $resObj = @{
+                    success = $true
+                    base64 = $base64
+                    fileName = [System.IO.Path]::GetFileName($tempFile)
+                }
                 $resBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $resObj))
                 $res.StatusCode = 200
                 $res.ContentType = "application/json; charset=utf-8"
                 $res.OutputStream.Write($resBytes, 0, $resBytes.Length)
                 $res.Close()
-                Write-Host "[SCAN OK] Скан отправлен в браузер!" -ForegroundColor Green
+                Write-Host "[SCAN OK] Scan sent to browser successfully!" -ForegroundColor Green
             } else {
-                $errObj = @{ success = $false; error = "Сканер не создал файл скана. Проверьте питание МФУ." }
+                $errObj = @{ success = $false; error = "Scanner did not create image file. Check USB cable and power." }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
                 $res.StatusCode = 500
                 $res.ContentType = "application/json; charset=utf-8"

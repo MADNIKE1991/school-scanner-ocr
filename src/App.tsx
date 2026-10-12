@@ -65,9 +65,11 @@ export default function App() {
 
   // Local Scanner Agent state (for Vercel -> Physical Scanner bridge)
   const [agentConnected, setAgentConnected] = useState<boolean>(false);
+  const [connectedAgentUrl, setConnectedAgentUrl] = useState<string | null>(null);
   const [agentDevices, setAgentDevices] = useState<Array<{ id: string; name: string; driverType: string }>>([]);
   const [selectedDevice, setSelectedDevice] = useState<string>('Kyocera ECOSYS M2040dn KX (WIA)');
   const [showAgentModal, setShowAgentModal] = useState<boolean>(false);
+  const [isCheckingAgent, setIsCheckingAgent] = useState<boolean>(false);
 
   // Camera scanner modal
   const [showCameraModal, setShowCameraModal] = useState<boolean>(false);
@@ -91,43 +93,59 @@ export default function App() {
   const [colorMode, setColorMode] = useState<'color' | 'grayscale' | 'bw'>('color');
   const [scanSource, setScanSource] = useState<'flatbed' | 'feeder'>('flatbed');
 
+  const LOCAL_BRIDGE_URLS = [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:17784',
+    'http://127.0.0.1:17784'
+  ];
+
   // Check Local Agent status on mount
   useEffect(() => {
     checkAgentConnection();
-    const interval = setInterval(checkAgentConnection, 6000);
+    const interval = setInterval(checkAgentConnection, 3000);
     return () => clearInterval(interval);
   }, []);
 
-  const checkAgentConnection = async () => {
-    try {
-      // 1. Try local bridge on user's machine (for Vercel)
-      const res = await fetch('http://127.0.0.1:3000/api/devices', { mode: 'cors' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.devices) {
-          setAgentConnected(true);
-          setAgentDevices(data.devices);
-          if (data.devices.length > 0 && !selectedDevice) {
-            setSelectedDevice(data.devices[0].name);
-          }
-          return;
-        }
-      }
-    } catch {
-      // 2. Try relative /api/devices if running fullstack locally
+  const checkAgentConnection = async (): Promise<boolean> => {
+    for (const base of LOCAL_BRIDGE_URLS) {
       try {
-        const res = await fetch('/api/devices');
+        const controller = new AbortController();
+        const tid = setTimeout(() => controller.abort(), 1600);
+        const res = await fetch(`${base}/api/devices`, { mode: 'cors', signal: controller.signal });
+        clearTimeout(tid);
         if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.devices) {
+          const data = await res.json().catch(() => null);
+          if (data && data.success) {
             setAgentConnected(true);
-            setAgentDevices(data.devices);
-            return;
+            setConnectedAgentUrl(base);
+            if (data.devices && data.devices.length > 0) {
+              setAgentDevices(data.devices);
+              if (!selectedDevice || selectedDevice.includes('default')) {
+                setSelectedDevice(data.devices[0].name);
+              }
+            }
+            return true;
           }
         }
       } catch {}
     }
+
+    try {
+      const res = await fetch('/api/devices');
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        if (data && data.success) {
+          setAgentConnected(true);
+          setConnectedAgentUrl('');
+          if (data.devices) setAgentDevices(data.devices);
+          return true;
+        }
+      }
+    } catch {}
+
     setAgentConnected(false);
+    return false;
   };
 
   // Cleanup camera stream on close
@@ -181,13 +199,16 @@ export default function App() {
   // Trigger Physical Scan with Kyocera via Local Bridge
   const handlePhysicalScan = async () => {
     setIsProcessing(true);
-    setStatusMsg(`Подключение к сканеру ${selectedDevice}... Запуск механизма...`);
+    setStatusMsg(`Подключение к сканеру ${selectedDevice}... Запуск каретки...`);
 
-    const endpoints = [
-      'http://127.0.0.1:3000/api/scan',
+    const endpoints = Array.from(new Set([
+      ...(connectedAgentUrl ? [`${connectedAgentUrl}/api/scan`] : []),
       'http://localhost:3000/api/scan',
+      'http://127.0.0.1:3000/api/scan',
+      'http://localhost:17784/api/scan',
+      'http://127.0.0.1:17784/api/scan',
       '/api/scan'
-    ];
+    ]));
 
     let successData: any = null;
     let agentErrorMessage: string | null = null;
@@ -221,7 +242,7 @@ export default function App() {
           agentErrorMessage = data.error;
           break;
         } else {
-          agentErrorMessage = `Сервер сканера вернул ошибку: HTTP ${res.status}`;
+          agentErrorMessage = `Сканер вернул ошибку: HTTP ${res.status}`;
           break;
         }
       } catch (err: any) {
@@ -246,10 +267,10 @@ export default function App() {
         sourceType: 'kyocera_wia'
       });
     } else if (agentReached && agentErrorMessage) {
-      // Agent is connected, but scanner hardware returned an error
-      alert(`Сообщение от сканера:\n${agentErrorMessage}`);
+      // Agent is connected, but scanner hardware reported an issue
+      alert(`Сообщение от драйвера сканера Kyocera:\n${agentErrorMessage}`);
     } else if (agentConnected) {
-      alert('Агент сканера запущен, но сканер не вернул файл. Убедитесь, что питание МФУ включено, кабель подключен и в лотке нет замятия бумаги.');
+      alert('Агент запущен, но сканер не вернул файл. Убедитесь, что питание МФУ включено, кабель подключен и в лотке нет замятия бумаги.');
     } else {
       // Agent is not responding at all on localhost
       setShowAgentModal(true);
@@ -470,19 +491,27 @@ export default function App() {
     const batContent = `@echo off
 rem ================================================================
 rem Kyocera Scanner Agent Bridge (Windows)
-rem No Node.js required! Uses built-in Windows PowerShell.
+rem No Node.js required. Zero configuration.
 rem ================================================================
 title Kyocera Scanner Local Agent
 cls
+
+echo ================================================================
+echo        KYOCERA LOCAL SCANNER AGENT (Windows Bridge)
+echo ================================================================
+echo.
 echo Starting Kyocera Scanner Local Bridge...
+echo.
+
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scanner-bridge.ps1"
+
 if %errorlevel% neq 0 (
     echo.
-    echo PowerShell script finished or encountered an issue.
+    echo Bridge closed or encountered an issue.
     pause
 )
 `;
-    const blob = new Blob([batContent], { type: 'application/bat' });
+    const blob = new Blob([batContent], { type: 'application/x-bat;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -494,16 +523,32 @@ if %errorlevel% neq 0 (
   };
 
   const downloadScannerBridgePs1 = () => {
-    const psContent = `# Kyocera Scanner Bridge (Windows PowerShell)
+    const psContent = `# Kyocera Scanner Local Bridge (Windows PowerShell)
 # 100% Pure ASCII - Zero Dependency, No Node.js required
-# Compatible with PowerShell 2.0, 3.0, 4.0, 5.0, 5.1 and PowerShell 7+ on all Windows editions
+# Compatible with PowerShell 2.0 to 5.1 and 7+ on Windows 7, 8, 10, 11
 
-$port = 3000
-$listener = New-Object System.Net.HttpListener
-$listener.Prefixes.Add("http://localhost:$port/")
-try {
-    $listener.Prefixes.Add("http://127.0.0.1:$port/")
-} catch {}
+$targetPorts = @(3000, 17784, 8080)
+$listener = $null
+$activePort = $null
+
+foreach ($p in $targetPorts) {
+    try {
+        $l = New-Object System.Net.HttpListener
+        $l.Prefixes.Add("http://localhost:$p/")
+        try { $l.Prefixes.Add("http://127.0.0.1:$p/") } catch {}
+        $l.Start()
+        $listener = $l
+        $activePort = $p
+        break
+    } catch {}
+}
+
+if (-not $listener) {
+    Write-Host "[ERROR] Could not bind to port 3000, 17784 or 8080." -ForegroundColor Red
+    Write-Host "Please close any program using these ports and restart." -ForegroundColor Yellow
+    Read-Host "Press Enter to exit..."
+    exit 1
+}
 
 function Find-Naps2 {
     $paths = @(
@@ -514,23 +559,29 @@ function Find-Naps2 {
         "$env:APPDATA\\NAPS2\\NAPS2.Console.exe",
         "$env:USERPROFILE\\Downloads\\NAPS2\\NAPS2.Console.exe",
         "$PSScriptRoot\\NAPS2.Console.exe",
-        "C:\\NAPS2\\NAPS2.Console.exe"
+        "C:\\NAPS2\\NAPS2.Console.exe",
+        "C:\\Program Files\\NAPS2\\NAPS2.exe",
+        "C:\\Program Files (x86)\\NAPS2\\NAPS2.exe"
     )
     foreach ($p in $paths) {
-        if ($p -and (Test-Path $p)) { return $p }
+        if ($p -and (Test-Path $p)) {
+            if ($p.EndsWith("NAPS2.exe")) {
+                $c = $p.Replace("NAPS2.exe", "NAPS2.Console.exe")
+                if (Test-Path $c) { return $c }
+            }
+            return $p
+        }
     }
     $cmd = Get-Command "naps2.console" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+    $cmd2 = Get-Command "naps2" -ErrorAction SilentlyContinue
+    if ($cmd2) {
+        $dir = Split-Path $cmd2.Source
+        $c = Join-Path $dir "NAPS2.Console.exe"
+        if (Test-Path $c) { return $c }
+        return $cmd2.Source
+    }
     return $null
-}
-
-try {
-    $listener.Start()
-} catch {
-    Write-Host "[ERROR] Could not bind to port $port. Is another server running on port $port?" -ForegroundColor Red
-    Write-Host $_.Exception.Message
-    Read-Host "Press Enter to exit..."
-    exit 1
 }
 
 $naps2 = Find-Naps2
@@ -539,14 +590,20 @@ Write-Host "================================================================" -F
 Write-Host "     KYOCERA SCANNER AGENT (Windows Native Bridge)" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Cyan
 if ($naps2) {
-    Write-Host "[OK] NAPS2 Scanner Driver found: $naps2" -ForegroundColor Green
+    Write-Host "[OK] NAPS2 CLI found: $naps2" -ForegroundColor Green
+    try {
+        $devList = & "$naps2" --list 2>&1
+        Write-Host "Scanner devices detected by NAPS2:" -ForegroundColor Cyan
+        $devList | ForEach-Object { Write-Host "  * $_" -ForegroundColor White }
+    } catch {}
 } else {
-    Write-Host "[WARN] NAPS2 not found. Bridge will use Windows WIA driver fallback." -ForegroundColor Yellow
-    Write-Host "       For best quality, install free NAPS2 from: https://www.naps2.com/" -ForegroundColor Gray
+    Write-Host "[INFO] NAPS2 CLI not found. Windows WIA COM fallback will be used." -ForegroundColor Yellow
+    Write-Host "       For best scanner support, install NAPS2 from: https://www.naps2.com/" -ForegroundColor Gray
 }
-Write-Host "[OK] Bridge listening on: http://localhost:$port/" -ForegroundColor Green
-Write-Host "Now open: https://school-scanner-ocr.vercel.app" -ForegroundColor Yellow
-Write-Host "Status: READY - Waiting for scan button click on website..." -ForegroundColor Green
+Write-Host ""
+Write-Host "[OK] Bridge listening on: http://localhost:$activePort/ and http://127.0.0.1:$activePort/" -ForegroundColor Green
+Write-Host "Status: READY - Now click 'SCAN' on the website!" -ForegroundColor Green
+Write-Host "Keep this window open while scanning." -ForegroundColor Gray
 Write-Host "================================================================\`n" -ForegroundColor Cyan
 
 while ($listener.IsListening) {
@@ -555,28 +612,36 @@ while ($listener.IsListening) {
         $req = $context.Request
         $res = $context.Response
 
+        # CORS & Chrome Private Network Access (PNA)
         $res.AddHeader("Access-Control-Allow-Origin", "*")
-        $res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        $res.AddHeader("Access-Control-Allow-Headers", "*")
+        $res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+        $res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin, Access-Control-Request-Private-Network, *")
         $res.AddHeader("Access-Control-Allow-Private-Network", "true")
+        $res.AddHeader("Access-Control-Max-Age", "86400")
 
+        # Handle Preflight OPTIONS
         if ($req.HttpMethod -eq "OPTIONS") {
             $res.StatusCode = 200
+            $res.ContentLength64 = 0
             $res.Close()
             continue
         }
 
         $path = $req.Url.AbsolutePath
 
+        # 1. GET /api/devices
         if ($req.HttpMethod -eq "GET" -and $path -eq "/api/devices") {
             $devices = @()
             if ($naps2) {
                 try {
-                    $rawList = & "$naps2" --list
+                    $rawList = & "$naps2" --listdevices 2>&1
+                    if ($LASTEXITCODE -ne 0 -or -not $rawList) {
+                        $rawList = & "$naps2" --list 2>&1
+                    }
                     $i = 0
                     foreach ($line in ($rawList -split "\`r?\`n")) {
                         $trimmed = $line.Trim()
-                        if ($trimmed) {
+                        if ($trimmed -and -not $trimmed.StartsWith("Error") -and -not $trimmed.StartsWith("Option") -and -not $trimmed.StartsWith("NAPS2")) {
                             $isTwain = $trimmed.ToLower().Contains("twain")
                             $devices += @{
                                 id = "dev-$i"
@@ -605,6 +670,7 @@ while ($listener.IsListening) {
                 success = $true
                 naps2Found = [bool]$naps2
                 binaryPath = $naps2
+                port = $activePort
                 devices = $devices
             }
 
@@ -616,6 +682,7 @@ while ($listener.IsListening) {
             continue
         }
 
+        # 2. POST /api/scan
         if ($req.HttpMethod -eq "POST" -and $path -eq "/api/scan") {
             Write-Host "[SCAN] Request received from browser!" -ForegroundColor Cyan
             $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
@@ -627,59 +694,67 @@ while ($listener.IsListening) {
             $colorMode = if ($bodyObj.colorMode) { $bodyObj.colorMode } else { "color" }
             $source = if ($bodyObj.source) { $bodyObj.source } else { "flatbed" }
 
+            $napsSource = if ($source -eq "feeder") { "feeder" } elseif ($source -eq "duplex") { "duplex" } else { "glass" }
+            $napsBitDepth = if ($colorMode -eq "bw") { "bw" } elseif ($colorMode -eq "grayscale") { "gray" } else { "color" }
+
             $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
             $scanSucceeded = $false
             $logs = @()
 
+            # Method A: NAPS2 with default profile configured by user
             if ($naps2) {
-                Write-Host "[NAPS2] Executing scan via NAPS2 (WIA)..." -ForegroundColor Yellow
-                $args1 = @("-o", $tempFile, "--driver", "wia", "--dpi", $dpi, "--pagesize", "a4")
-                if ($deviceName -and -not $deviceName.Contains("kyocera-default")) {
-                    $args1 += @("--device", $deviceName)
-                }
-                if ($colorMode -eq "bw") { $args1 += @("--bitdepth", "1") }
-                elseif ($colorMode -eq "grayscale") { $args1 += @("--bitdepth", "8") }
-                else { $args1 += @("--bitdepth", "24") }
-                if ($source -eq "feeder") { $args1 += @("--source", "feeder") }
-                else { $args1 += @("--source", "flatbed") }
-
-                $out1 = & "$naps2" $args1 2>&1
-                $logs += "WIA: $out1"
-                Write-Host "  NAPS2 output: $out1" -ForegroundColor Gray
-
+                Write-Host "[NAPS2] Attempt 1: Trying default GUI profile..." -ForegroundColor Yellow
+                $args0 = @("-o", $tempFile, "-f")
+                $out0 = & "$naps2" $args0 2>&1
+                $logs += "Default Profile: $out0"
                 if (Test-Path $tempFile) {
                     $scanSucceeded = $true
-                } else {
-                    Write-Host "[NAPS2] Trying default profile..." -ForegroundColor Yellow
-                    $args2 = @("-o", $tempFile, "--dpi", $dpi)
-                    $out2 = & "$naps2" $args2 2>&1
-                    $logs += "Default: $out2"
-                    Write-Host "  NAPS2 output: $out2" -ForegroundColor Gray
-                    if (Test-Path $tempFile) { $scanSucceeded = $true }
-                }
-
-                if (-not $scanSucceeded) {
-                    Write-Host "[NAPS2] Trying TWAIN driver..." -ForegroundColor Yellow
-                    $args3 = @("-o", $tempFile, "--driver", "twain", "--dpi", $dpi)
-                    $out3 = & "$naps2" $args3 2>&1
-                    $logs += "TWAIN: $out3"
-                    Write-Host "  NAPS2 output: $out3" -ForegroundColor Gray
-                    if (Test-Path $tempFile) { $scanSucceeded = $true }
+                    Write-Host "  [OK] Scanned using default profile!" -ForegroundColor Green
                 }
             }
 
+            # Method B: NAPS2 with WIA parameters
+            if (-not $scanSucceeded -and $naps2) {
+                Write-Host "[NAPS2] Attempt 2: Scanning via WIA (source=$napsSource, dpi=$dpi)..." -ForegroundColor Yellow
+                $args1 = @("-o", $tempFile, "-f", "--driver", "wia", "--dpi", $dpi, "--pagesize", "a4", "--source", $napsSource, "--bitdepth", $napsBitDepth)
+                if ($deviceName -and -not $deviceName.Contains("kyocera-default")) {
+                    $args1 += @("--device", $deviceName)
+                }
+                $out1 = & "$naps2" $args1 2>&1
+                $logs += "WIA: $out1"
+                if (Test-Path $tempFile) {
+                    $scanSucceeded = $true
+                    Write-Host "  [OK] Scanned using WIA driver!" -ForegroundColor Green
+                }
+            }
+
+            # Method C: NAPS2 with TWAIN
+            if (-not $scanSucceeded -and $naps2) {
+                Write-Host "[NAPS2] Attempt 3: Scanning via TWAIN..." -ForegroundColor Yellow
+                $args2 = @("-o", $tempFile, "-f", "--driver", "twain", "--dpi", $dpi, "--source", $napsSource, "--bitdepth", $napsBitDepth)
+                $out2 = & "$naps2" $args2 2>&1
+                $logs += "TWAIN: $out2"
+                if (Test-Path $tempFile) {
+                    $scanSucceeded = $true
+                    Write-Host "  [OK] Scanned using TWAIN driver!" -ForegroundColor Green
+                }
+            }
+
+            # Method D: Windows Native WIA COM Fallback
             if (-not $scanSucceeded) {
-                Write-Host "[WIA] Trying Windows Native WIA..." -ForegroundColor Yellow
+                Write-Host "[WIA] Attempt 4: Using Windows Native WIA dialog..." -ForegroundColor Yellow
                 try {
                     $dialog = New-Object -ComObject WIA.CommonDialog
                     $image = $dialog.ShowAcquireImage()
                     if ($image) {
                         $image.SaveFile($tempFile)
-                        if (Test-Path $tempFile) { $scanSucceeded = $true }
+                        if (Test-Path $tempFile) {
+                            $scanSucceeded = $true
+                            Write-Host "  [OK] Scanned using Windows WIA dialog!" -ForegroundColor Green
+                        }
                     }
                 } catch {
-                    $logs += "WIA: $($_.Exception.Message)"
-                    Write-Host "  WIA Error: $($_.Exception.Message)" -ForegroundColor Gray
+                    $logs += "WIA COM: $($_.Exception.Message)"
                 }
             }
 
@@ -698,10 +773,10 @@ while ($listener.IsListening) {
                 $res.ContentType = "application/json; charset=utf-8"
                 $res.OutputStream.Write($resBytes, 0, $resBytes.Length)
                 $res.Close()
-                Write-Host "[SCAN OK] Scan completed! Sent to website successfully!" -ForegroundColor Green
+                Write-Host "[SCAN OK] Scan completed successfully and sent to browser!" -ForegroundColor Green
             } else {
                 $logSummary = ($logs -join "; ").Trim()
-                $errorMsg = "Zakroyte otkrytoe okno programmy NAPS2 (ono zakhvatilo USB port skanera). Proverte kabel Kyocera. Log: $logSummary"
+                $errorMsg = "Scanner error. Please make sure Kyocera is connected by USB, powered on, and NAPS2 GUI is not holding the scanner. Details: $logSummary"
                 Write-Host "[SCAN FAILED] $errorMsg" -ForegroundColor Red
                 $errObj = @{ success = $false; error = $errorMsg }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
@@ -713,6 +788,7 @@ while ($listener.IsListening) {
             continue
         }
 
+        # 404
         $res.StatusCode = 404
         $res.Close()
     } catch {
@@ -720,7 +796,8 @@ while ($listener.IsListening) {
     }
 }
 `;
-    const blob = new Blob([psContent], { type: 'text/plain' });
+    // Prepend UTF-8 BOM so Windows PowerShell 5.1 reads it reliably
+    const blob = new Blob(['\uFEFF', psContent], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1212,99 +1289,143 @@ while ($listener.IsListening) {
       {/* AGENT CONNECTION MODAL (Bridge for Vercel to physical USB / WIA scanner) */}
       {showAgentModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl p-6 space-y-5">
+          <div className="bg-white rounded-2xl max-w-xl w-full overflow-hidden shadow-2xl p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-sm">
                   <Printer className="w-5 h-5" />
                 </div>
                 <div>
                   <h3 className="font-bold text-sm text-slate-900">Подключение сканера Kyocera к сайту</h3>
-                  <p className="text-[11px] text-slate-500">Запуск физического сканирования прямо из браузера</p>
+                  <p className="text-[11px] text-slate-500">Сайт открыт в облаке на Vercel</p>
                 </div>
               </div>
-              <button onClick={() => setShowAgentModal(false)} className="text-slate-400 hover:text-slate-600">
+              <button onClick={() => setShowAgentModal(false)} className="text-slate-400 hover:text-slate-600 p-1 rounded-lg">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="space-y-3 text-xs text-slate-600 leading-relaxed">
-              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 space-y-1">
-                <span className="font-bold flex items-center gap-1.5">
-                  <HelpCircle className="w-4 h-4 text-blue-600 shrink-0" />
-                  Почему нужен агент?
-                </span>
-                <p className="text-[11px]">
-                  Сайт открыт в облаке на Vercel. Из соображений безопасности ни один браузер в мире не может без локального моста управлять моторами USB-устройств.
-                </p>
-                <p className="text-[11px]">
-                  <strong>Локальный агент</strong> — это крошечный скрипт на вашем компьютере, который принимает команду с сайта и передает её в официальный драйвер Kyocera через NAPS2!
-                </p>
-              </div>
-
-              <div className="space-y-2 border-t border-slate-100 pt-2">
-                <span className="font-bold text-slate-800 text-xs">Как включить за 1 минуту:</span>
-                
+            {/* If already connected, show success message */}
+            {agentConnected ? (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 space-y-3">
                 <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">1</span>
-                  <span>Скачайте 2 файла в одну папку (Node.js НЕ нужен):</span>
+                  <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping"></span>
+                  <strong className="text-sm">Сканер Kyocera успешно подключен и готов к работе!</strong>
+                </div>
+                <p className="text-xs text-emerald-700">
+                  Связь с локальным мостом установлена на {connectedAgentUrl || 'localhost'}. Вы можете закрыть это окно и нажать «СКАНИРОВАТЬ С МФУ».
+                </p>
+                <button
+                  onClick={() => {
+                    setShowAgentModal(false);
+                    handlePhysicalScan();
+                  }}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-md cursor-pointer"
+                >
+                  Запустить сканирование сейчас
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3.5 text-xs text-slate-600 leading-relaxed">
+                {/* Notice why needed */}
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 space-y-1">
+                  <span className="font-bold flex items-center gap-1.5 text-xs text-amber-800">
+                    <HelpCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                    Почему браузер запрашивает запуск агента?
+                  </span>
+                  <p className="text-[11px] text-amber-800/90 leading-normal">
+                    Так как сайт задеплоен на Vercel (в интернете), безопасность веб-браузеров запрещает сайтам напрямую крутить мотор USB-сканера без локального процесса-моста на вашем компьютере.
+                  </p>
                 </div>
 
-                <div className="flex items-center gap-2 pl-7 flex-wrap">
-                  <button
-                    onClick={downloadAgentScript}
-                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Скачать start-scanner.bat</span>
-                  </button>
-
-                  <button
-                    onClick={downloadScannerBridgePs1}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Скачать scanner-bridge.ps1</span>
-                  </button>
+                {/* Option A: Direct NAPS2 scan */}
+                <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-blue-900 text-xs flex items-center gap-1.5">
+                      <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[10px] font-bold flex items-center justify-center">1</span>
+                      Самый простой способ (если программа NAPS2 уже открыта на ПК):
+                    </span>
+                    <span className="text-[10px] bg-blue-200 text-blue-800 font-bold px-2 py-0.5 rounded-full">Без скриптов</span>
+                  </div>
+                  <ol className="list-decimal pl-5 space-y-1 text-[11px] text-blue-900/90">
+                    <li>В окне <strong>NAPS2</strong> на вашем ПК нажмите кнопку <strong>«Сканировать»</strong> (Scan).</li>
+                    <li>Нажмите <strong>«Сохранить PDF»</strong> (или Сохранить изображения).</li>
+                    <li>
+                      Перетащите полученный PDF прямо на эту страницу или нажмите кнопку
+                      <button
+                        onClick={() => {
+                          setShowAgentModal(false);
+                          fileInputRef.current?.click();
+                        }}
+                        className="inline-flex items-center gap-1 ml-1.5 px-2 py-0.5 bg-blue-600 text-white font-bold rounded text-[10px] cursor-pointer hover:bg-blue-500 align-baseline"
+                      >
+                        <UploadCloud className="w-3 h-3" />
+                        <span>Выбрать PDF</span>
+                      </button>
+                      &nbsp;— весь текст из скана моментально распознается в Word!
+                    </li>
+                  </ol>
                 </div>
 
-                <div className="pl-7 text-[10px] text-emerald-700 bg-emerald-50 p-2 rounded-lg border border-emerald-200">
-                  ✓ <strong>Без установки Node.js:</strong> агент использует встроенный Windows PowerShell, который уже есть на каждом школьном компьютере с Windows.
-                </div>
-
-                <div className="flex items-center gap-2 pt-1">
-                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">2</span>
-                  <span>Дважды кликните по файлу <strong>start-scanner.bat</strong> на вашем ПК.</span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">3</span>
-                  <span>Нажмите зеленую кнопку ниже для проверки связи:</span>
+                {/* Option B: Local bridge agent */}
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center">2</span>
+                      Для сканирования по зеленой кнопке с сайта:
+                    </span>
+                    <span className="text-[10px] bg-slate-200 text-slate-700 font-bold px-2 py-0.5 rounded-full">Локальный мост</span>
+                  </div>
+                  <p className="text-[11px] text-slate-600">
+                    Скачайте скрипт моста в папку на ПК и запустите его (Node.js не требуется, работает встроенный Windows PowerShell):
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      onClick={downloadAgentScript}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Скачать start-scanner.bat</span>
+                    </button>
+                    <button
+                      onClick={downloadScannerBridgePs1}
+                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Скачать scanner-bridge.ps1</span>
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500">
+                    Положите оба файла в одну папку и запустите <strong>start-scanner.bat</strong>. Не закрывайте черное окно во время сканирования.
+                  </p>
                 </div>
               </div>
-            </div>
+            )}
 
             <div className="flex items-center justify-between border-t border-slate-200 pt-3">
               <span className="text-xs">
-                Статус связи: {agentConnected ? (
+                Статус: {agentConnected ? (
                   <strong className="text-emerald-600 font-bold">Подключено онлайн ✓</strong>
                 ) : (
-                  <span className="text-amber-600 font-medium">Ожидание запуска агента...</span>
+                  <span className="text-amber-600 font-medium">Ожидание запуска start-scanner.bat...</span>
                 )}
               </span>
 
               <div className="flex items-center gap-2">
                 <button
+                  disabled={isCheckingAgent}
                   onClick={async () => {
-                    await checkAgentConnection();
-                    if (agentConnected) {
+                    setIsCheckingAgent(true);
+                    const connected = await checkAgentConnection();
+                    setIsCheckingAgent(false);
+                    if (connected) {
                       setShowAgentModal(false);
                     }
                   }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer"
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Проверить связь со сканером</span>
+                  <RefreshCw className={`w-3.5 h-3.5 ${isCheckingAgent ? 'animate-spin' : ''}`} />
+                  <span>{isCheckingAgent ? 'Проверка...' : 'Проверить связь'}</span>
                 </button>
               </div>
             </div>

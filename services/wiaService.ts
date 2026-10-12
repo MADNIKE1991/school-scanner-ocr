@@ -101,7 +101,14 @@ export async function listDevices(): Promise<{ devices: DeviceInfo[]; naps2Found
   }
 
   try {
-    const { stdout } = await execFilePromise(naps2Path, ['--list']);
+    let stdout = '';
+    try {
+      const res = await execFilePromise(naps2Path, ['--listdevices']);
+      stdout = res.stdout;
+    } catch {
+      const res = await execFilePromise(naps2Path, ['--list']);
+      stdout = res.stdout;
+    }
     const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const parsedDevices: DeviceInfo[] = [];
 
@@ -168,18 +175,18 @@ export async function executeScan(options: ScanOptions = {}): Promise<{
 
   if (naps2Path) {
     try {
-      const args: string[] = ['-o', outputPath, '--dpi', String(dpi), '--pagesize', pageSize];
+      const args: string[] = ['-o', outputPath, '-f', '--dpi', String(dpi), '--pagesize', pageSize];
 
-      if (options.deviceName) {
+      if (options.deviceName && !options.deviceName.includes('kyocera-default')) {
         args.push('--device', options.deviceName);
       }
 
       if (colorMode === 'bw') {
-        args.push('--bitdepth', '1');
+        args.push('--bitdepth', 'bw');
       } else if (colorMode === 'grayscale') {
-        args.push('--bitdepth', '8');
+        args.push('--bitdepth', 'gray');
       } else {
-        args.push('--bitdepth', '24');
+        args.push('--bitdepth', 'color');
       }
 
       if (options.duplex || options.source === 'duplex') {
@@ -187,7 +194,7 @@ export async function executeScan(options: ScanOptions = {}): Promise<{
       } else if (options.source === 'feeder') {
         args.push('--source', 'feeder');
       } else {
-        args.push('--source', 'flatbed');
+        args.push('--source', 'glass');
       }
 
       logMessage('INFO', `Вызов: ${naps2Path} ${args.join(' ')}`);

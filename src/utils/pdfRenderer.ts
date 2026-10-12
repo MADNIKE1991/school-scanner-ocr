@@ -1,7 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist';
+// Use locally bundled worker via Vite URL import for 100% offline and reliable PDF rendering
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-// Configure pdfjs worker using standard cdnjs build
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 /**
  * Рендерит страницы PDF в растровые изображения (PNG) для OCR и предпросмотра

@@ -1,25 +1,18 @@
 @echo off
-chcp 65001 > nul
-title Kyocera Scanner Agent Bridge
+rem ================================================================
+rem Kyocera Scanner Agent Bridge (Windows)
+rem No Node.js required! Uses built-in Windows PowerShell.
+rem ================================================================
+title Kyocera Scanner Local Agent
+cls
 
-echo ================================================================
-echo    ЗАПУСК МОСТА СКАНИРОВАНИЯ KYOCERA ДЛЯ ВЕБ-САЙТА
-echo ================================================================
+echo Starting Kyocera Scanner Local Bridge...
 echo.
 
-where node >nul 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scanner-bridge.ps1"
+
 if %errorlevel% neq 0 (
-    echo [ОШИБКА] Node.js не найден на этом компьютере!
-    echo Скачайте и установите Node.js с официального сайта: https://nodejs.org/
-    echo После установки перезапустите этот файл.
+    echo.
+    echo PowerShell script finished or encountered an issue.
     pause
-    exit /b
 )
-
-echo [OK] Node.js обнаружен.
-echo Запуск локального агента на порту 3000...
-echo.
-
-node bridge-agent.js
-
-pause

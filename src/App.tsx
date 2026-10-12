@@ -38,6 +38,7 @@ import { exportDocxClient } from './utils/clientDocx.ts';
 import { exportSearchablePdfClient } from './utils/clientPdf.ts';
 import { requestUsbScanner, testNetworkKyocera, enhanceDocumentImage } from './utils/hardwareScanner.ts';
 import { runClientOcr } from './utils/clientOcr.ts';
+import { renderPdfToImages } from './utils/pdfRenderer.ts';
 
 interface ScannedPage {
   id: string;
@@ -272,19 +273,44 @@ export default function App() {
     }
   };
 
-  // Upload file from computer
-  const handleFileUpload = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      if (e.target?.result) {
-        addScannedPage({
-          id: `upload-${Date.now()}`,
-          imageUrl: e.target.result as string,
-          sourceType: 'upload'
+  // Upload file from computer (supports PNG, JPG, JPEG, WEBP and multi-page PDF!)
+  const handleFileUpload = async (file: File) => {
+    setIsProcessing(true);
+    try {
+      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      if (isPdf) {
+        setStatusMsg('Извлечение страниц из PDF для распознавания...');
+        const pageImages = await renderPdfToImages(file);
+        if (pageImages.length === 0) {
+          alert('В загруженном PDF не найдено страниц');
+          return;
+        }
+        pageImages.forEach((imgUrl, i) => {
+          addScannedPage({
+            id: `upload-pdf-${Date.now()}-${i}`,
+            imageUrl: imgUrl,
+            sourceType: 'upload'
+          });
         });
+      } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          if (e.target?.result) {
+            addScannedPage({
+              id: `upload-${Date.now()}`,
+              imageUrl: e.target.result as string,
+              sourceType: 'upload'
+            });
+          }
+        };
+        reader.readAsDataURL(file);
       }
-    };
-    reader.readAsDataURL(file);
+    } catch (err: any) {
+      alert(`Ошибка открытия файла: ${err.message}`);
+    } finally {
+      setIsProcessing(false);
+      setStatusMsg('');
+    }
   };
 
   // Add Page to queue
@@ -414,27 +440,22 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Download Agent Starter Scripts directly from the browser
+  // Download Zero-Dependency PowerShell Agent directly from the browser
   const downloadAgentScript = () => {
     const batContent = `@echo off
-chcp 65001 > nul
+rem ================================================================
+rem Kyocera Scanner Agent Bridge (Windows)
+rem No Node.js required! Uses built-in Windows PowerShell.
+rem ================================================================
 title Kyocera Scanner Local Agent
-echo ================================================================
-echo    ЗАПУСК АГЕНТА СКАНИРОВАНИЯ ДЛЯ САЙТА VERCEL
-echo ================================================================
-echo.
-where node >nul 2>nul
+cls
+echo Starting Kyocera Scanner Local Bridge...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scanner-bridge.ps1"
 if %errorlevel% neq 0 (
-    echo [ОШИБКА] Node.js не установлен!
-    echo Скачайте бесплатный Node.js с https://nodejs.org/ и установите его.
+    echo.
+    echo PowerShell script finished or encountered an issue.
     pause
-    exit /b
 )
-echo [OK] Запуск агента на http://127.0.0.1:3000...
-echo Теперь сайт на Vercel сможет физически сканировать с вашего МФУ!
-echo.
-node bridge-agent.js
-pause
 `;
     const blob = new Blob([batContent], { type: 'application/bat' });
     const url = URL.createObjectURL(blob);
@@ -447,127 +468,192 @@ pause
     URL.revokeObjectURL(url);
   };
 
-  const downloadBridgeJs = () => {
-    const jsContent = `const http = require('http');
-const { execFile, exec } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const { promisify } = require('util');
+  const downloadScannerBridgePs1 = () => {
+    const psContent = `# Kyocera Scanner Bridge (Windows PowerShell)
+# Zero dependencies - does NOT require Node.js or npm!
+# Works out of the box on Windows 10, Windows 11, Windows 8, and Windows 7.
 
-const execPromise = promisify(exec);
-const execFilePromise = promisify(execFile);
-const PORT = 3000;
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-async function findNaps2() {
-  const candidates = ['naps2.console', 'naps2.console.exe'];
-  if (process.platform === 'win32') {
-    candidates.push('C:\\\\Program Files\\\\NAPS2\\\\NAPS2.Console.exe');
-    candidates.push('C:\\\\Program Files (x86)\\\\NAPS2\\\\NAPS2.Console.exe');
-  }
-  for (const bin of candidates) {
-    try {
-      if (path.isAbsolute(bin)) {
-        if (fs.existsSync(bin)) return bin;
-      } else {
-        const cmd = process.platform === 'win32' ? \`where \${bin}\` : \`which \${bin}\`;
-        const { stdout } = await execPromise(cmd);
-        if (stdout && stdout.trim()) return stdout.trim().split(/\\r?\\n/)[0];
-      }
-    } catch {}
-  }
-  return null;
+$port = 3000
+$listener = New-Object System.Net.HttpListener
+$listener.Prefixes.Add("http://localhost:$port/")
+try {
+    $listener.Prefixes.Add("http://127.0.0.1:$port/")
+} catch {}
+
+function Find-Naps2 {
+    $paths = @(
+        "C:\\Program Files\\NAPS2\\NAPS2.Console.exe",
+        "C:\\Program Files (x86)\\NAPS2\\NAPS2.Console.exe"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path $p) { return $p }
+    }
+    $cmd = Get-Command "naps2.console" -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
 }
 
-const server = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+try {
+    $listener.Start()
+} catch {
+    Write-Host "[ERROR] Could not bind to port $port. Is another server running?" -ForegroundColor Red
+    Write-Host $_.Exception.Message
+    Read-Host "Press Enter to exit..."
+    exit 1
+}
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    return res.end();
-  }
+$naps2 = Find-Naps2
 
-  const url = new URL(req.url, \`http://\${req.headers.host}\`);
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "     KYOCERA SCANNER AGENT (Windows Native Bridge)" -ForegroundColor Green
+Write-Host "================================================================" -ForegroundColor Cyan
+if ($naps2) {
+    Write-Host "[OK] NAPS2 Scanner Driver found: $naps2" -ForegroundColor Green
+} else {
+    Write-Host "[WARN] NAPS2 not found. Download free NAPS2 from: https://www.naps2.com/" -ForegroundColor Yellow
+}
+Write-Host "[OK] Bridge listening on: http://localhost:$port/" -ForegroundColor Green
+Write-Host "Now open: https://school-scanner-ocr.vercel.app" -ForegroundColor Yellow
+Write-Host "Press Ctrl+C in this window to stop the scanner." -ForegroundColor Gray
+Write-Host "================================================================\`n" -ForegroundColor Cyan
 
-  if (req.method === 'GET' && url.pathname === '/api/devices') {
-    const naps2 = await findNaps2();
-    let devices = [];
-    if (naps2) {
-      try {
-        const { stdout } = await execFilePromise(naps2, ['--list']);
-        devices = stdout.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map((name, i) => ({
-          id: \`dev-\${i}\`,
-          name,
-          driverType: name.toLowerCase().includes('twain') ? 'TWAIN' : 'WIA',
-          isDefault: i === 0,
-          status: 'Ready'
-        }));
-      } catch {}
-    }
-    if (devices.length === 0) {
-      devices = [{ id: 'kyocera-default', name: 'Kyocera ECOSYS M2040dn KX (WIA)', driverType: 'WIA', isDefault: true, status: 'Ready' }];
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ success: true, naps2Found: Boolean(naps2), devices }));
-  }
+while ($listener.IsListening) {
+    try {
+        $context = $listener.GetContext()
+        $req = $context.Request
+        $res = $context.Response
 
-  if (req.method === 'POST' && url.pathname === '/api/scan') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', async () => {
-      try {
-        const data = body ? JSON.parse(body) : {};
-        const { deviceName, dpi = 300, colorMode = 'color', source = 'flatbed' } = data;
-        const naps2 = await findNaps2();
-        if (!naps2) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          return res.end(JSON.stringify({ success: false, error: 'Установите NAPS2 с https://www.naps2.com/' }));
+        $res.AddHeader("Access-Control-Allow-Origin", "*")
+        $res.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        $res.AddHeader("Access-Control-Allow-Headers", "*")
+        $res.AddHeader("Access-Control-Allow-Private-Network", "true")
+
+        if ($req.HttpMethod -eq "OPTIONS") {
+            $res.StatusCode = 200
+            $res.Close()
+            continue
         }
 
-        const filePath = path.join(__dirname, \`scan_\${Date.now()}.png\`);
-        const args = ['-o', filePath, '--dpi', String(dpi), '--pagesize', 'a4'];
-        if (deviceName) args.push('--device', deviceName);
-        if (colorMode === 'bw') args.push('--bitdepth', '1');
-        else if (colorMode === 'grayscale') args.push('--bitdepth', '8');
-        else args.push('--bitdepth', '24');
-        if (source === 'feeder') args.push('--source', 'feeder');
-        else args.push('--source', 'flatbed');
+        $path = $req.Url.AbsolutePath
 
-        console.log('[SCAN] Запуск физического сканирования МФУ...');
-        await execFilePromise(naps2, args, { timeout: 90000 });
+        if ($req.HttpMethod -eq "GET" -and $path -eq "/api/devices") {
+            $devices = @()
+            if ($naps2) {
+                try {
+                    $rawList = & "$naps2" --list
+                    $i = 0
+                    foreach ($line in ($rawList -split "\`r?\`n")) {
+                        $trimmed = $line.Trim()
+                        if ($trimmed) {
+                            $isTwain = $trimmed.ToLower().Contains("twain")
+                            $devices += @{
+                                id = "dev-$i"
+                                name = $trimmed
+                                driverType = if ($isTwain) { "TWAIN" } else { "WIA" }
+                                isDefault = ($i -eq 0)
+                                status = "Ready"
+                            }
+                            $i++
+                        }
+                    }
+                } catch {}
+            }
 
-        let base64 = null;
-        if (fs.existsSync(filePath)) {
-          base64 = \`data:image/png;base64,\${fs.readFileSync(filePath).toString('base64')}\`;
-          fs.unlinkSync(filePath);
+            if ($devices.Count -eq 0) {
+                $devices += @{
+                    id = "kyocera-default"
+                    name = "Kyocera ECOSYS M2040dn KX (WIA)"
+                    driverType = "WIA"
+                    isDefault = $true
+                    status = "Ready"
+                }
+            }
+
+            $jsonObj = @{
+                success = $true
+                naps2Found = [bool]$naps2
+                binaryPath = $naps2
+                devices = $devices
+            }
+
+            $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $jsonObj -Depth 5))
+            $res.ContentType = "application/json; charset=utf-8"
+            $res.ContentLength64 = $jsonBytes.Length
+            $res.OutputStream.Write($jsonBytes, 0, $jsonBytes.Length)
+            $res.Close()
+            continue
         }
 
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ success: true, base64 }));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ success: false, error: err.message }));
-      }
-    });
-    return;
-  }
+        if ($req.HttpMethod -eq "POST" -and $path -eq "/api/scan") {
+            $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
+            $body = $reader.ReadToEnd()
+            $bodyObj = try { ConvertFrom-Json $body } catch { @{} }
 
-  res.writeHead(404);
-  res.end();
-});
+            $deviceName = if ($bodyObj.deviceName) { $bodyObj.deviceName } else { "" }
+            $dpi = if ($bodyObj.dpi) { [string]$bodyObj.dpi } else { "300" }
+            $colorMode = if ($bodyObj.colorMode) { $bodyObj.colorMode } else { "color" }
+            $source = if ($bodyObj.source) { $bodyObj.source } else { "flatbed" }
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(\`KYOCERA AGENT АКТИВЕН НА ПОРТУ \${PORT}\`);
-  console.log('Откройте сайт на Vercel - сканер подключен!');
-});
+            if (-not $naps2) {
+                $errObj = @{ success = $false; error = "NAPS2 не найден на компьютере. Установите NAPS2 с https://www.naps2.com/" }
+                $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
+                $res.StatusCode = 500
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($errBytes, 0, $errBytes.Length)
+                $res.Close()
+                continue
+            }
+
+            $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
+
+            $argsList = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
+            if ($deviceName) { $argsList += @("--device", $deviceName) }
+            if ($colorMode -eq "bw") { $argsList += @("--bitdepth", "1") }
+            elseif ($colorMode -eq "grayscale") { $argsList += @("--bitdepth", "8") }
+            else { $argsList += @("--bitdepth", "24") }
+            if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
+            else { $argsList += @("--source", "flatbed") }
+
+            Write-Host "[SCAN] Физическое сканирование..." -ForegroundColor Cyan
+            & "$naps2" $argsList
+
+            if (Test-Path $tempFile) {
+                $fileBytes = [System.IO.File]::ReadAllBytes($tempFile)
+                $base64 = "data:image/png;base64," + [Convert]::ToBase64String($fileBytes)
+                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+
+                $resObj = @{ success = $true; base64 = $base64 }
+                $resBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $resObj))
+                $res.StatusCode = 200
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($resBytes, 0, $resBytes.Length)
+                $res.Close()
+                Write-Host "[SCAN OK] Скан отправлен в браузер!" -ForegroundColor Green
+            } else {
+                $errObj = @{ success = $false; error = "Сканер не создал файл скана. Проверьте питание МФУ." }
+                $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
+                $res.StatusCode = 500
+                $res.ContentType = "application/json; charset=utf-8"
+                $res.OutputStream.Write($errBytes, 0, $errBytes.Length)
+                $res.Close()
+            }
+            continue
+        }
+
+        $res.StatusCode = 404
+        $res.Close()
+    } catch {
+        Write-Host "[ERROR] $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
 `;
-    const blob = new Blob([jsContent], { type: 'application/javascript' });
+    const blob = new Blob([psContent], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'bridge-agent.js';
+    a.download = 'scanner-bridge.ps1';
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1042,10 +1128,10 @@ server.listen(PORT, '0.0.0.0', () => {
                 
                 <div className="flex items-center gap-2">
                   <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">1</span>
-                  <span>Скачайте 2 файла в одну папку на вашем компьютере:</span>
+                  <span>Скачайте 2 файла в одну папку (Node.js НЕ нужен):</span>
                 </div>
 
-                <div className="flex items-center gap-2 pl-7">
+                <div className="flex items-center gap-2 pl-7 flex-wrap">
                   <button
                     onClick={downloadAgentScript}
                     className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
@@ -1055,17 +1141,21 @@ server.listen(PORT, '0.0.0.0', () => {
                   </button>
 
                   <button
-                    onClick={downloadBridgeJs}
+                    onClick={downloadScannerBridgePs1}
                     className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Скачать bridge-agent.js</span>
+                    <span>Скачать scanner-bridge.ps1</span>
                   </button>
+                </div>
+
+                <div className="pl-7 text-[10px] text-emerald-700 bg-emerald-50 p-2 rounded-lg border border-emerald-200">
+                  ✓ <strong>Без установки Node.js:</strong> агент использует встроенный Windows PowerShell, который уже есть на каждом школьном компьютере с Windows.
                 </div>
 
                 <div className="flex items-center gap-2 pt-1">
                   <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">2</span>
-                  <span>Дважды кликните по файлу <strong>start-scanner.bat</strong> (он запустится в фоне).</span>
+                  <span>Дважды кликните по файлу <strong>start-scanner.bat</strong> на вашем ПК.</span>
                 </div>
 
                 <div className="flex items-center gap-2">

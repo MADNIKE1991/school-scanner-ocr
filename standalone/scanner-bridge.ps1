@@ -172,7 +172,7 @@ while ($listener.IsListening) {
                 Write-Host "[WIA] Attempting scan via Windows WIA native interface..." -ForegroundColor Yellow
                 try {
                     $dialog = New-Object -ComObject WIA.CommonDialog
-                    $image = $dialog.ShowAcquireImage(1, 1, 65536, "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}", $true, $false, $false)
+                    $image = $dialog.ShowAcquireImage()
                     if ($image) {
                         $image.SaveFile($tempFile)
                         if (Test-Path $tempFile) { $scanSucceeded = $true }
@@ -199,7 +199,7 @@ while ($listener.IsListening) {
                 $res.Close()
                 Write-Host "[SCAN OK] Scan completed! Sent to website successfully!" -ForegroundColor Green
             } else {
-                $msg = "Scanner did not return an image. Check: 1) Scanner power and USB cable. 2) Install NAPS2 from https://www.naps2.com/ if not installed."
+                $msg = "Dlya zapuska kareki skanera trebuetsya besplatnaya programma NAPS2 (15 MB). Skachayte ee s sayta: https://www.naps2.com/ (ili vstavte kabel USB i vkluchite pitanie MFP)."
                 Write-Host "[SCAN FAILED] $msg" -ForegroundColor Red
                 $errObj = @{ success = $false; error = $msg }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))

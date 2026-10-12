@@ -185,13 +185,19 @@ export default function App() {
 
     const endpoints = [
       'http://127.0.0.1:3000/api/scan',
+      'http://localhost:3000/api/scan',
       '/api/scan'
     ];
 
     let successData: any = null;
+    let agentErrorMessage: string | null = null;
+    let agentReached = false;
 
     for (const ep of endpoints) {
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+
         const res = await fetch(ep, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -200,17 +206,30 @@ export default function App() {
             dpi,
             colorMode,
             source: scanSource
-          })
+          }),
+          signal: controller.signal
         });
+        clearTimeout(timeoutId);
 
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success) {
-            successData = data;
-            break;
-          }
+        agentReached = true;
+        const data = await res.json().catch(() => null);
+
+        if (res.ok && data && data.success) {
+          successData = data;
+          break;
+        } else if (data && data.error) {
+          agentErrorMessage = data.error;
+          break;
+        } else {
+          agentErrorMessage = `Сервер сканера вернул ошибку: HTTP ${res.status}`;
+          break;
         }
-      } catch (err) {
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          agentErrorMessage = 'Превышено время ожидания сканера (МФУ не ответило за 90 секунд). Проверьте кабель сканера.';
+          agentReached = true;
+          break;
+        }
         // try next endpoint
       }
     }
@@ -226,8 +245,13 @@ export default function App() {
         imageUrl: imgUrl,
         sourceType: 'kyocera_wia'
       });
+    } else if (agentReached && agentErrorMessage) {
+      // Agent is connected, but scanner hardware returned an error
+      alert(`Сообщение от сканера:\n${agentErrorMessage}`);
+    } else if (agentConnected) {
+      alert('Агент сканера запущен, но сканер не вернул файл. Убедитесь, что питание МФУ включено, кабель подключен и в лотке нет замятия бумаги.');
     } else {
-      // Agent is not responding, open agent instructions modal with 1-click downloads
+      // Agent is not responding at all on localhost
       setShowAgentModal(true);
     }
   };
@@ -484,10 +508,16 @@ try {
 function Find-Naps2 {
     $paths = @(
         "C:\\Program Files\\NAPS2\\NAPS2.Console.exe",
-        "C:\\Program Files (x86)\\NAPS2\\NAPS2.Console.exe"
+        "C:\\Program Files (x86)\\NAPS2\\NAPS2.Console.exe",
+        "$env:LOCALAPPDATA\\Programs\\NAPS2\\NAPS2.Console.exe",
+        "$env:LOCALAPPDATA\\NAPS2\\NAPS2.Console.exe",
+        "$env:APPDATA\\NAPS2\\NAPS2.Console.exe",
+        "$env:USERPROFILE\\Downloads\\NAPS2\\NAPS2.Console.exe",
+        "$PSScriptRoot\\NAPS2.Console.exe",
+        "C:\\NAPS2\\NAPS2.Console.exe"
     )
     foreach ($p in $paths) {
-        if (Test-Path $p) { return $p }
+        if ($p -and (Test-Path $p)) { return $p }
     }
     $cmd = Get-Command "naps2.console" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
@@ -511,11 +541,12 @@ Write-Host "================================================================" -F
 if ($naps2) {
     Write-Host "[OK] NAPS2 Scanner Driver found: $naps2" -ForegroundColor Green
 } else {
-    Write-Host "[WARN] NAPS2 not found. Download free NAPS2 from: https://www.naps2.com/" -ForegroundColor Yellow
+    Write-Host "[WARN] NAPS2 not found. Bridge will use Windows WIA driver fallback." -ForegroundColor Yellow
+    Write-Host "       For best quality, install free NAPS2 from: https://www.naps2.com/" -ForegroundColor Gray
 }
 Write-Host "[OK] Bridge listening on: http://localhost:$port/" -ForegroundColor Green
 Write-Host "Now open: https://school-scanner-ocr.vercel.app" -ForegroundColor Yellow
-Write-Host "Press Ctrl+C in this window to stop the scanner." -ForegroundColor Gray
+Write-Host "Status: READY - Waiting for scan button click on website..." -ForegroundColor Green
 Write-Host "================================================================\`n" -ForegroundColor Cyan
 
 while ($listener.IsListening) {
@@ -586,6 +617,7 @@ while ($listener.IsListening) {
         }
 
         if ($req.HttpMethod -eq "POST" -and $path -eq "/api/scan") {
+            Write-Host "[SCAN] Request received from browser!" -ForegroundColor Cyan
             $reader = New-Object System.IO.StreamReader($req.InputStream, [System.Text.Encoding]::UTF8)
             $body = $reader.ReadToEnd()
             $bodyObj = try { ConvertFrom-Json $body } catch { @{} }
@@ -595,30 +627,51 @@ while ($listener.IsListening) {
             $colorMode = if ($bodyObj.colorMode) { $bodyObj.colorMode } else { "color" }
             $source = if ($bodyObj.source) { $bodyObj.source } else { "flatbed" }
 
-            if (-not $naps2) {
-                $errObj = @{ success = $false; error = "NAPS2 not found on PC. Please install NAPS2 from https://www.naps2.com/" }
-                $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
-                $res.StatusCode = 500
-                $res.ContentType = "application/json; charset=utf-8"
-                $res.OutputStream.Write($errBytes, 0, $errBytes.Length)
-                $res.Close()
-                continue
+            $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
+            $scanSucceeded = $false
+
+            if ($naps2) {
+                $argsList = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
+                if ($deviceName -and -not $deviceName.Contains("kyocera-default")) {
+                    $argsList += @("--device", $deviceName)
+                }
+                if ($colorMode -eq "bw") { $argsList += @("--bitdepth", "1") }
+                elseif ($colorMode -eq "grayscale") { $argsList += @("--bitdepth", "8") }
+                else { $argsList += @("--bitdepth", "24") }
+                if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
+                else { $argsList += @("--source", "flatbed") }
+
+                Write-Host "[SCAN] Running NAPS2 with device: $deviceName..." -ForegroundColor Yellow
+                Start-Process -FilePath $naps2 -ArgumentList $argsList -Wait -NoNewWindow -ErrorAction SilentlyContinue
+
+                if (Test-Path $tempFile) {
+                    $scanSucceeded = $true
+                } elseif ($deviceName) {
+                    Write-Host "[RETRY] Scanning with default device..." -ForegroundColor Yellow
+                    $retryArgs = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
+                    if ($colorMode -eq "bw") { $retryArgs += @("--bitdepth", "1") }
+                    elseif ($colorMode -eq "grayscale") { $retryArgs += @("--bitdepth", "8") }
+                    else { $retryArgs += @("--bitdepth", "24") }
+                    Start-Process -FilePath $naps2 -ArgumentList $retryArgs -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                    if (Test-Path $tempFile) { $scanSucceeded = $true }
+                }
             }
 
-            $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
+            if (-not $scanSucceeded) {
+                Write-Host "[WIA] Attempting scan via Windows WIA native interface..." -ForegroundColor Yellow
+                try {
+                    $dialog = New-Object -ComObject WIA.CommonDialog
+                    $image = $dialog.ShowAcquireImage(1, 1, 65536, "{B96B3CAF-0728-11D3-9D7B-0000F81EF32E}", $true, $false, $false)
+                    if ($image) {
+                        $image.SaveFile($tempFile)
+                        if (Test-Path $tempFile) { $scanSucceeded = $true }
+                    }
+                } catch {
+                    Write-Host "[WIA INFO] WIA Dialog: $($_.Exception.Message)" -ForegroundColor Gray
+                }
+            }
 
-            $argsList = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
-            if ($deviceName) { $argsList += @("--device", $deviceName) }
-            if ($colorMode -eq "bw") { $argsList += @("--bitdepth", "1") }
-            elseif ($colorMode -eq "grayscale") { $argsList += @("--bitdepth", "8") }
-            else { $argsList += @("--bitdepth", "24") }
-            if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
-            else { $argsList += @("--source", "flatbed") }
-
-            Write-Host "[SCAN] Starting physical Kyocera scan..." -ForegroundColor Cyan
-            & "$naps2" $argsList
-
-            if (Test-Path $tempFile) {
+            if ($scanSucceeded -and (Test-Path $tempFile)) {
                 $fileBytes = [System.IO.File]::ReadAllBytes($tempFile)
                 $base64 = "data:image/png;base64," + [Convert]::ToBase64String($fileBytes)
                 Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
@@ -633,9 +686,11 @@ while ($listener.IsListening) {
                 $res.ContentType = "application/json; charset=utf-8"
                 $res.OutputStream.Write($resBytes, 0, $resBytes.Length)
                 $res.Close()
-                Write-Host "[SCAN OK] Scan sent to browser successfully!" -ForegroundColor Green
+                Write-Host "[SCAN OK] Scan completed! Sent to website successfully!" -ForegroundColor Green
             } else {
-                $errObj = @{ success = $false; error = "Scanner did not create image file. Check USB cable and power." }
+                $msg = "Scanner did not return an image. Check: 1) Scanner power and USB cable. 2) Install NAPS2 from https://www.naps2.com/"
+                Write-Host "[SCAN FAILED] $msg" -ForegroundColor Red
+                $errObj = @{ success = $false; error = $msg }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
                 $res.StatusCode = 500
                 $res.ContentType = "application/json; charset=utf-8"

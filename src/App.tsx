@@ -89,6 +89,7 @@ export default function App() {
   // Advanced WIA settings
   const [dpi, setDpi] = useState<number>(300);
   const [colorMode, setColorMode] = useState<'color' | 'grayscale' | 'bw'>('color');
+  const [scanSource, setScanSource] = useState<'flatbed' | 'feeder'>('flatbed');
 
   // Check Local Agent status on mount
   useEffect(() => {
@@ -198,7 +199,7 @@ export default function App() {
             deviceName: selectedDevice,
             dpi,
             colorMode,
-            source: 'flatbed'
+            source: scanSource
           })
         });
 
@@ -698,39 +699,50 @@ while ($listener.IsListening) {
           </div>
         </div>
 
-        {/* Mode Selector Tabs */}
-        <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+        {/* Mode Selector Tabs & Quick Scan Button */}
+        <div className="flex items-center gap-2">
           <button
-            onClick={() => setAppMode('school')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
-              appMode === 'school'
-                ? 'bg-white text-blue-700 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
+            onClick={handlePhysicalScan}
+            disabled={isProcessing}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-extrabold text-xs rounded-xl shadow-md flex items-center gap-2 cursor-pointer transition-all"
           >
-            <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-            <span>Школьный режим</span>
+            <Printer className="w-4 h-4" />
+            <span>СКАНИРОВАТЬ</span>
           </button>
 
-          <button
-            onClick={() => setShowAgentModal(true)}
-            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition-all flex items-center gap-1.5 cursor-pointer"
-          >
-            <Terminal className="w-3.5 h-3.5 text-purple-600" />
-            <span>Агент сканера</span>
-          </button>
+          <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl">
+            <button
+              onClick={() => setAppMode('school')}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                appMode === 'school'
+                  ? 'bg-white text-blue-700 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+              <span>Школьный режим</span>
+            </button>
 
-          <button
-            onClick={() => setAppMode('advanced')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
-              appMode === 'advanced'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Sliders className="w-3.5 h-3.5 text-slate-500" />
-            <span>Настройки DPI</span>
-          </button>
+            <button
+              onClick={() => setShowAgentModal(true)}
+              className="px-3.5 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <Terminal className="w-3.5 h-3.5 text-purple-600" />
+              <span>Агент сканера</span>
+            </button>
+
+            <button
+              onClick={() => setAppMode('advanced')}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                appMode === 'advanced'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5 text-slate-500" />
+              <span>Настройки DPI</span>
+            </button>
+          </div>
         </div>
       </header>
 
@@ -762,55 +774,92 @@ while ($listener.IsListening) {
                   <span className="text-[11px] text-slate-400 font-medium">Страниц: {pages.length}</span>
                 </div>
 
-                {/* 4 Large Action Cards */}
-                <div className="grid grid-cols-2 gap-2.5">
-                  {/* Real Physical Scanner Kyocera Button */}
+                {/* 1. HUGE UNMISSABLE PRIMARY SCAN BUTTON */}
+                <div className="space-y-2">
                   <button
                     onClick={handlePhysicalScan}
-                    className="p-3 rounded-xl border-2 border-emerald-200 hover:border-emerald-500 bg-emerald-50/30 hover:bg-emerald-50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
+                    disabled={isProcessing}
+                    className="w-full py-4 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.99] text-white rounded-2xl font-bold text-sm shadow-lg shadow-emerald-600/20 transition-all flex items-center justify-between cursor-pointer group"
                   >
-                    <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center group-hover:scale-105 transition-transform shadow-sm">
-                      <Printer className="w-5 h-5" />
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center text-white shrink-0 group-hover:scale-105 transition-transform shadow-inner">
+                        <Printer className="w-6 h-6" />
+                      </div>
+                      <div className="text-left">
+                        <div className="flex items-center gap-2">
+                          <span className="text-base font-extrabold tracking-tight">СКАНИРОВАТЬ С МФУ</span>
+                          {agentConnected && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-300 animate-ping"></span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-emerald-100 font-normal">
+                          {agentConnected ? 'МФУ готово • Нажмите для старта' : 'Нажмите для запуска каретки сканера'}
+                        </span>
+                      </div>
                     </div>
-                    <span className="text-xs font-bold text-slate-800">Сканер Kyocera</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Физический запуск со стекла / АПД</span>
+                    <div className="bg-white/20 hover:bg-white/30 text-white px-3.5 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-xs shrink-0">
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>СТАРТ</span>
+                    </div>
                   </button>
 
-                  {/* Camera button - REAL LIVE CAMERA */}
-                  <button
-                    onClick={startCamera}
-                    className="p-3 rounded-xl border-2 border-blue-100 hover:border-blue-500 hover:bg-blue-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center group-hover:scale-105 transition-transform shadow-sm">
-                      <Camera className="w-5 h-5" />
-                    </div>
-                    <span className="text-xs font-bold text-slate-800">Камера</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Сфотографировать с ноутбука/телефона</span>
-                  </button>
+                  {/* Flatbed vs Feeder toggle */}
+                  <div className="flex items-center bg-slate-100 p-1 rounded-xl text-[11px] font-semibold text-slate-600">
+                    <button
+                      onClick={() => setScanSource('flatbed')}
+                      className={`flex-1 py-1.5 rounded-lg transition-all text-center cursor-pointer ${
+                        scanSource === 'flatbed' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'hover:text-slate-900'
+                      }`}
+                    >
+                      Со стекла (Flatbed)
+                    </button>
+                    <button
+                      onClick={() => setScanSource('feeder')}
+                      className={`flex-1 py-1.5 rounded-lg transition-all text-center cursor-pointer ${
+                        scanSource === 'feeder' ? 'bg-white text-slate-900 shadow-xs font-bold' : 'hover:text-slate-900'
+                      }`}
+                    >
+                      С автоподатчика (ADF)
+                    </button>
+                  </div>
+                </div>
 
-                  {/* File Upload / Drag & Drop */}
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-3 rounded-xl border-2 border-purple-100 hover:border-purple-500 hover:bg-purple-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-purple-600 text-white flex items-center justify-center group-hover:scale-105 transition-transform shadow-sm">
-                      <UploadCloud className="w-5 h-5" />
-                    </div>
-                    <span className="text-xs font-bold text-slate-800">Загрузить скан</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Файл с флешки или компьютера</span>
-                  </button>
+                {/* Alternative sources */}
+                <div className="pt-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1.5">
+                    Или другие способы:
+                  </span>
+                  <div className="grid grid-cols-3 gap-2">
+                    {/* Camera button */}
+                    <button
+                      onClick={startCamera}
+                      className="p-2.5 rounded-xl border border-slate-200 hover:border-blue-500 hover:bg-blue-50/50 transition-all text-center flex flex-col items-center justify-center gap-1 group cursor-pointer"
+                    >
+                      <Camera className="w-4 h-4 text-blue-600 group-hover:scale-110 transition-transform" />
+                      <span className="text-[11px] font-bold text-slate-800">Камера</span>
+                      <span className="text-[9px] text-slate-400 leading-none">Ноутбук</span>
+                    </button>
 
-                  {/* Network Kyocera */}
-                  <button
-                    onClick={() => setShowNetworkModal(true)}
-                    className="p-3 rounded-xl border border-slate-200 hover:border-indigo-500 hover:bg-indigo-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center group-hover:scale-105 transition-transform">
-                      <Wifi className="w-5 h-5" />
-                    </div>
-                    <span className="text-xs font-bold text-slate-800">МФУ по сети</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Подключение по IP-адресу</span>
-                  </button>
+                    {/* File Upload / PDF */}
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="p-2.5 rounded-xl border border-slate-200 hover:border-purple-500 hover:bg-purple-50/50 transition-all text-center flex flex-col items-center justify-center gap-1 group cursor-pointer"
+                    >
+                      <UploadCloud className="w-4 h-4 text-purple-600 group-hover:scale-110 transition-transform" />
+                      <span className="text-[11px] font-bold text-slate-800">Файл PDF/фото</span>
+                      <span className="text-[9px] text-slate-400 leading-none">С флешки</span>
+                    </button>
+
+                    {/* Network Kyocera */}
+                    <button
+                      onClick={() => setShowNetworkModal(true)}
+                      className="p-2.5 rounded-xl border border-slate-200 hover:border-indigo-500 hover:bg-indigo-50/50 transition-all text-center flex flex-col items-center justify-center gap-1 group cursor-pointer"
+                    >
+                      <Wifi className="w-4 h-4 text-indigo-600 group-hover:scale-110 transition-transform" />
+                      <span className="text-[11px] font-bold text-slate-800">По сети</span>
+                      <span className="text-[9px] text-slate-400 leading-none">По IP</span>
+                    </button>
+                  </div>
                 </div>
 
                 <input

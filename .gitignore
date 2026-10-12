@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+logs/
+scans/*.png
+scans/*.svg
+scans/*.jpg
+output/*.docx
+output/*.pdf
+.env*
+!.env.example

@@ -1,0 +1,33 @@
+{
+  "name": "kyocera-scanner-ocr",
+  "version": "1.0.0",
+  "description": "Локальное приложение сканирования с МФУ Kyocera (WIA/TWAIN) и распознавания OCR (rus+eng) в DOCX и Searchable PDF",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "docx": "^9.8.1",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-lib": "^1.17.1",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "keywords": [
+    "kyocera",
+    "wia",
+    "twain",
+    "naps2",
+    "ocr",
+    "tesseract",
+    "docx",
+    "searchable-pdf"
+  ],
+  "author": "",
+  "license": "MIT"
+}

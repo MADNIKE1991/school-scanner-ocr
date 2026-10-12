@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kyocera Scanner OCR Desktop</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Шапка -->
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-title">Kyocera Scanner OCR</span>
+      </div>
+      <div class="header-actions">
+        <button id="themeToggle" class="btn btn-ghost" title="Переключить тему">🌓 Тема</button>
+      </div>
+    </header>
+
+    <!-- Основная рабочая область -->
+    <main class="app-main">
+      <!-- Левая колонка: Настройки сканирования и МФУ Kyocera -->
+      <aside class="sidebar">
+        <div class="panel">
+          <h2 class="panel-title">Источник и сканер</h2>
+          
+          <div class="form-group">
+            <label for="deviceSelect">WIA-устройство Kyocera:</label>
+            <select id="deviceSelect" class="input">
+              <option value="">Загрузка устройств...</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="dpiSelect">DPI:</label>
+              <select id="dpiSelect" class="input">
+                <option value="150">150 DPI (быстро)</option>
+                <option value="300" selected>300 DPI (стандарт)</option>
+                <option value="600">600 DPI (высокое)</option>
+              </select>
+            </div>
+
+            <div class="form-group half">
+              <label for="colorSelect">Цвет:</label>
+              <select id="colorSelect" class="input">
+                <option value="color" selected>Цвет (24-bit)</option>
+                <option value="grayscale">Оттенки серого (8-bit)</option>
+                <option value="bw">Ч/Б (1-bit)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label for="formatSelect">Формат:</label>
+              <select id="formatSelect" class="input">
+                <option value="a4" selected>A4</option>
+                <option value="letter">Letter</option>
+              </select>
+            </div>
+
+            <div class="form-group half">
+              <label for="sourceSelect">Податчик:</label>
+              <select id="sourceSelect" class="input">
+                <option value="flatbed" selected>Стекло (Flatbed)</option>
+                <option value="feeder">АПД (Feeder)</option>
+                <option value="duplex">Двусторонний</option>
+              </select>
+            </div>
+          </div>
+
+          <button id="scanBtn" class="btn btn-primary btn-block">
+            <span>Сканировать</span>
+          </button>
+
+          <div class="upload-dropzone" id="dropzone">
+            <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
+            <p>Перетащите скан сюда или <a href="#" id="browseLink">выберите файл</a></p>
+          </div>
+        </div>
+
+        <!-- Очередь страниц -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">Страницы документа (<span id="pageCount">0</span>)</h2>
+            <button id="clearPagesBtn" class="btn btn-xs btn-ghost">Очистить</button>
+          </div>
+          <div id="pagesList" class="pages-thumbnail-list">
+            <div class="empty-state">Нет отсканированных страниц</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Центральная область: Холст превью и OCR блок -->
+      <section class="workspace">
+        <!-- Тулбар холста -->
+        <div class="workspace-toolbar">
+          <div class="toolbar-left">
+            <label for="langSelect">Язык OCR:</label>
+            <select id="langSelect" class="input input-sm">
+              <option value="rus+eng" selected>RUS + ENG</option>
+              <option value="rus">Только RUS</option>
+              <option value="eng">Только ENG</option>
+            </select>
+            <button id="ocrBtn" class="btn btn-secondary btn-sm" disabled>Распознать</button>
+          </div>
+
+          <div class="toolbar-right">
+            <label class="checkbox-label">
+              <input type="checkbox" id="toggleBoxes" checked>
+              <span>Показать рамки слов</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Прогресс-бар -->
+        <div id="progressContainer" class="progress-bar-container" style="display: none;">
+          <div class="progress-bar-fill" id="progressBarFill"></div>
+          <span class="progress-label" id="progressLabel">0%</span>
+        </div>
+
+        <!-- Область холста -->
+        <div class="canvas-viewport" id="canvasViewport">
+          <div class="canvas-container">
+            <canvas id="previewCanvas"></canvas>
+            <div id="boxOverlay" class="box-overlay"></div>
+          </div>
+        </div>
+
+        <!-- Нижняя панель: Редактор текста и экспорт -->
+        <div class="text-editor-panel">
+          <div class="editor-header">
+            <h3>Распознанный текст</h3>
+            <div class="export-actions">
+              <button id="exportDocxBtn" class="btn btn-action" disabled>Сохранить в DOCX</button>
+              <button id="exportPdfBtn" class="btn btn-action" disabled>Сохранить в Searchable PDF</button>
+            </div>
+          </div>
+          <textarea id="recognizedTextArea" placeholder="Здесь появится распознанный текст после нажатия кнопки «Распознать»... Вы сможете отредактировать текст перед экспортом."></textarea>
+          
+          <!-- Найденные ссылки -->
+          <div class="links-preview" id="linksPreview">
+            <strong>Обнаруженные ссылки:</strong> <span id="linksList" class="links-inline">нет</span>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

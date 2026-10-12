@@ -1,0 +1,6 @@
+{
+  "name": "Kyocera Scanner OCR Desktop",
+  "description": "Локальное десктопное веб-приложение для сканирования с МФУ Kyocera (WIA/TWAIN/NAPS2), локального OCR и экспорта в DOCX и Searchable PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

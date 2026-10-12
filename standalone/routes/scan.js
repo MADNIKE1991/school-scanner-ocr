@@ -30,7 +30,11 @@ router.get('/devices', async (req, res) => {
 router.post('/scan', async (req, res) => {
   try {
     const result = await scan(req.body);
-    res.json({ success: true, file: result.fileName });
+    let base64 = null;
+    if (result.filePath && fs.existsSync(result.filePath)) {
+      base64 = `data:image/png;base64,${fs.readFileSync(result.filePath).toString('base64')}`;
+    }
+    res.json({ success: true, file: result.fileName, base64 });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

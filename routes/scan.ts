@@ -58,6 +58,12 @@ scanRouter.post('/scan', async (req: Request, res: Response) => {
       source: source || 'flatbed',
     });
 
+    let base64Data: string | undefined;
+    if (fs.existsSync(scanResult.filePath)) {
+      const buf = fs.readFileSync(scanResult.filePath);
+      base64Data = `data:image/png;base64,${buf.toString('base64')}`;
+    }
+
     res.json({
       success: true,
       file: scanResult.fileName,
@@ -65,6 +71,7 @@ scanRouter.post('/scan', async (req: Request, res: Response) => {
       isSimulated: scanResult.isSimulated,
       metadata: scanResult.metadata,
       previewUrl: `/api/download/${scanResult.fileName}`,
+      base64: base64Data,
     });
   } catch (err: any) {
     logMessage('ERROR', 'Ошибка процесса сканирования: ' + err.message);

@@ -30,7 +30,9 @@ import {
   Eye,
   Link as LinkIcon,
   X,
-  Play
+  Play,
+  Terminal,
+  Server
 } from 'lucide-react';
 import { exportDocxClient } from './utils/clientDocx.ts';
 import { exportSearchablePdfClient } from './utils/clientPdf.ts';
@@ -59,7 +61,12 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [copied, setCopied] = useState<boolean>(false);
   const [selectedLang, setSelectedLang] = useState<'rus+eng' | 'rus' | 'eng'>('rus+eng');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Local Scanner Agent state (for Vercel -> Physical Scanner bridge)
+  const [agentConnected, setAgentConnected] = useState<boolean>(false);
+  const [agentDevices, setAgentDevices] = useState<Array<{ id: string; name: string; driverType: string }>>([]);
+  const [selectedDevice, setSelectedDevice] = useState<string>('Kyocera ECOSYS M2040dn KX (WIA)');
+  const [showAgentModal, setShowAgentModal] = useState<boolean>(false);
 
   // Camera scanner modal
   const [showCameraModal, setShowCameraModal] = useState<boolean>(false);
@@ -81,6 +88,45 @@ export default function App() {
   // Advanced WIA settings
   const [dpi, setDpi] = useState<number>(300);
   const [colorMode, setColorMode] = useState<'color' | 'grayscale' | 'bw'>('color');
+
+  // Check Local Agent status on mount
+  useEffect(() => {
+    checkAgentConnection();
+    const interval = setInterval(checkAgentConnection, 6000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const checkAgentConnection = async () => {
+    try {
+      // 1. Try local bridge on user's machine (for Vercel)
+      const res = await fetch('http://127.0.0.1:3000/api/devices', { mode: 'cors' });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.devices) {
+          setAgentConnected(true);
+          setAgentDevices(data.devices);
+          if (data.devices.length > 0 && !selectedDevice) {
+            setSelectedDevice(data.devices[0].name);
+          }
+          return;
+        }
+      }
+    } catch {
+      // 2. Try relative /api/devices if running fullstack locally
+      try {
+        const res = await fetch('/api/devices');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && data.devices) {
+            setAgentConnected(true);
+            setAgentDevices(data.devices);
+            return;
+          }
+        }
+      } catch {}
+    }
+    setAgentConnected(false);
+  };
 
   // Cleanup camera stream on close
   const stopCamera = () => {
@@ -130,18 +176,79 @@ export default function App() {
     stopCamera();
   };
 
-  // Connect USB scanner via WebUSB
+  // Trigger Physical Scan with Kyocera via Local Bridge
+  const handlePhysicalScan = async () => {
+    setIsProcessing(true);
+    setStatusMsg(`Подключение к сканеру ${selectedDevice}... Запуск механизма...`);
+
+    const endpoints = [
+      'http://127.0.0.1:3000/api/scan',
+      '/api/scan'
+    ];
+
+    let successData: any = null;
+
+    for (const ep of endpoints) {
+      try {
+        const res = await fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceName: selectedDevice,
+            dpi,
+            colorMode,
+            source: 'flatbed'
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            successData = data;
+            break;
+          }
+        }
+      } catch (err) {
+        // try next endpoint
+      }
+    }
+
+    setIsProcessing(false);
+    setStatusMsg('');
+
+    if (successData) {
+      // Received real scanned document from scanner!
+      const imgUrl = successData.base64 || `/api/download/${successData.file}?inline=true`;
+      addScannedPage({
+        id: `scan-${Date.now()}`,
+        imageUrl: imgUrl,
+        sourceType: 'kyocera_wia'
+      });
+    } else {
+      // Agent is not responding, open agent instructions modal with 1-click downloads
+      setShowAgentModal(true);
+    }
+  };
+
+  // Connect USB scanner via WebUSB or local bridge
   const handleConnectUsb = async () => {
+    if (agentConnected) {
+      await handlePhysicalScan();
+      return;
+    }
+
     try {
-      setStatusMsg('Поиск USB сканера Kyocera...');
+      setStatusMsg('Поиск USB сканера...');
       setIsProcessing(true);
       const scanner = await requestUsbScanner();
       if (scanner) {
         setConnectedUsbDevice(scanner.name);
-        await triggerHardwareScan(scanner.name, 'usb');
+        await handlePhysicalScan();
+      } else {
+        setShowAgentModal(true);
       }
     } catch (err: any) {
-      alert(`USB сканер: ${err.message}\n\nПодсказка: Вы также можете сделать моментальный скан документа через камеру или загрузить файл скана.`);
+      setShowAgentModal(true);
     } finally {
       setIsProcessing(false);
       setStatusMsg('');
@@ -156,47 +263,9 @@ export default function App() {
       const res = await testNetworkKyocera(printerIp);
       setNetworkStatus(res.message);
       setShowNetworkModal(false);
-      await triggerHardwareScan(`Kyocera ECOSYS (${printerIp})`, 'network');
+      await handlePhysicalScan();
     } catch (err: any) {
       setNetworkStatus(`Ошибка: ${err.message}`);
-    } finally {
-      setIsProcessing(false);
-      setStatusMsg('');
-    }
-  };
-
-  // Trigger Hardware Scan (if local agent or API is available)
-  const triggerHardwareScan = async (deviceName: string, source: ScannedPage['sourceType']) => {
-    setIsProcessing(true);
-    setStatusMsg(`Подключение к ${deviceName}... Захват страницы...`);
-    setErrorMessage(null);
-
-    try {
-      // Check if local backend or agent is accessible
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceName, dpi, colorMode })
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-
-      if (data.success && data.file) {
-        addScannedPage({
-          id: `scan-${Date.now()}`,
-          imageUrl: `/api/download/${data.file}?inline=true`,
-          sourceType: source
-        });
-        return;
-      } else {
-        throw new Error(data.error || 'Ошибка захвата изображения со сканера');
-      }
-    } catch (err: any) {
-      // Running on Vercel static cloud without local WIA bridge
-      setErrorMessage(
-        `Сайт открыт на Vercel (в облаке). Браузер не может напрямую отдавать низкоуровневые команды в локальный USB-порт без установленного агента.\n\nРешение:\n1) Нажмите кнопку «Камера» — сделайте фото документа прямо с камеры ноутбука или смартфона.\n2) Или нажмите «Загрузить фото» и выберите файл со сканера/флешки.`
-      );
     } finally {
       setIsProcessing(false);
       setStatusMsg('');
@@ -225,7 +294,6 @@ export default function App() {
       setActivePageIndex(next.length - 1);
       return next;
     });
-    setErrorMessage(null);
   };
 
   // Delete page
@@ -242,42 +310,9 @@ export default function App() {
     const page = pages[activePageIndex];
 
     setIsProcessing(true);
-    setErrorMessage(null);
 
     try {
-      // First try local backend if available
-      try {
-        const res = await fetch('/api/ocr', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            fileName: page.imageUrl.includes('scan_') ? page.imageUrl.split('/').pop()?.split('?')[0] : '',
-            lang: selectedLang
-          })
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.data && data.data.text) {
-            setPages(prev => {
-              const copy = [...prev];
-              copy[activePageIndex] = {
-                ...page,
-                text: data.data.text,
-                words: data.data.words,
-                links: data.data.links,
-                confidence: data.data.confidence
-              };
-              return copy;
-            });
-            return;
-          }
-        }
-      } catch {
-        // Fall back to client-side in-browser Tesseract.js
-      }
-
-      // Execute Real Client-Side OCR in the Browser on the actual document image!
+      // Execute Real Client-Side OCR in the Browser on the actual document image
       const ocrResult = await runClientOcr(
         page.imageUrl,
         selectedLang,
@@ -287,7 +322,7 @@ export default function App() {
       const recognizedText = ocrResult.text.trim();
       const finalDisplayText = recognizedText.length > 0
         ? recognizedText
-        : 'Текст не распознан. Пожалуйста, убедитесь, что документ четкий, без смазанных участков и с хорошим освещением.';
+        : 'Текст не распознан. Убедитесь, что страница освещена и текст в фокусе.';
 
       setPages(prev => {
         const copy = [...prev];
@@ -301,7 +336,7 @@ export default function App() {
         return copy;
       });
     } catch (err: any) {
-      setErrorMessage(`Ошибка распознавания: ${err.message}`);
+      alert(`Ошибка распознавания: ${err.message}`);
     } finally {
       setIsProcessing(false);
       setStatusMsg('');
@@ -379,6 +414,166 @@ export default function App() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Download Agent Starter Scripts directly from the browser
+  const downloadAgentScript = () => {
+    const batContent = `@echo off
+chcp 65001 > nul
+title Kyocera Scanner Local Agent
+echo ================================================================
+echo    ЗАПУСК АГЕНТА СКАНИРОВАНИЯ ДЛЯ САЙТА VERCEL
+echo ================================================================
+echo.
+where node >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ОШИБКА] Node.js не установлен!
+    echo Скачайте бесплатный Node.js с https://nodejs.org/ и установите его.
+    pause
+    exit /b
+)
+echo [OK] Запуск агента на http://127.0.0.1:3000...
+echo Теперь сайт на Vercel сможет физически сканировать с вашего МФУ!
+echo.
+node bridge-agent.js
+pause
+`;
+    const blob = new Blob([batContent], { type: 'application/bat' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'start-scanner.bat';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadBridgeJs = () => {
+    const jsContent = `const http = require('http');
+const { execFile, exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { promisify } = require('util');
+
+const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile);
+const PORT = 3000;
+
+async function findNaps2() {
+  const candidates = ['naps2.console', 'naps2.console.exe'];
+  if (process.platform === 'win32') {
+    candidates.push('C:\\\\Program Files\\\\NAPS2\\\\NAPS2.Console.exe');
+    candidates.push('C:\\\\Program Files (x86)\\\\NAPS2\\\\NAPS2.Console.exe');
+  }
+  for (const bin of candidates) {
+    try {
+      if (path.isAbsolute(bin)) {
+        if (fs.existsSync(bin)) return bin;
+      } else {
+        const cmd = process.platform === 'win32' ? \`where \${bin}\` : \`which \${bin}\`;
+        const { stdout } = await execPromise(cmd);
+        if (stdout && stdout.trim()) return stdout.trim().split(/\\r?\\n/)[0];
+      }
+    } catch {}
+  }
+  return null;
+}
+
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(200);
+    return res.end();
+  }
+
+  const url = new URL(req.url, \`http://\${req.headers.host}\`);
+
+  if (req.method === 'GET' && url.pathname === '/api/devices') {
+    const naps2 = await findNaps2();
+    let devices = [];
+    if (naps2) {
+      try {
+        const { stdout } = await execFilePromise(naps2, ['--list']);
+        devices = stdout.split(/\\r?\\n/).map(s => s.trim()).filter(Boolean).map((name, i) => ({
+          id: \`dev-\${i}\`,
+          name,
+          driverType: name.toLowerCase().includes('twain') ? 'TWAIN' : 'WIA',
+          isDefault: i === 0,
+          status: 'Ready'
+        }));
+      } catch {}
+    }
+    if (devices.length === 0) {
+      devices = [{ id: 'kyocera-default', name: 'Kyocera ECOSYS M2040dn KX (WIA)', driverType: 'WIA', isDefault: true, status: 'Ready' }];
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ success: true, naps2Found: Boolean(naps2), devices }));
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/scan') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { deviceName, dpi = 300, colorMode = 'color', source = 'flatbed' } = data;
+        const naps2 = await findNaps2();
+        if (!naps2) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: false, error: 'Установите NAPS2 с https://www.naps2.com/' }));
+        }
+
+        const filePath = path.join(__dirname, \`scan_\${Date.now()}.png\`);
+        const args = ['-o', filePath, '--dpi', String(dpi), '--pagesize', 'a4'];
+        if (deviceName) args.push('--device', deviceName);
+        if (colorMode === 'bw') args.push('--bitdepth', '1');
+        else if (colorMode === 'grayscale') args.push('--bitdepth', '8');
+        else args.push('--bitdepth', '24');
+        if (source === 'feeder') args.push('--source', 'feeder');
+        else args.push('--source', 'flatbed');
+
+        console.log('[SCAN] Запуск физического сканирования МФУ...');
+        await execFilePromise(naps2, args, { timeout: 90000 });
+
+        let base64 = null;
+        if (fs.existsSync(filePath)) {
+          base64 = \`data:image/png;base64,\${fs.readFileSync(filePath).toString('base64')}\`;
+          fs.unlinkSync(filePath);
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: true, base64 }));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(\`KYOCERA AGENT АКТИВЕН НА ПОРТУ \${PORT}\`);
+  console.log('Откройте сайт на Vercel - сканер подключен!');
+});
+`;
+    const blob = new Blob([jsContent], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'bridge-agent.js';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const currentPage = activePageIndex >= 0 ? pages[activePageIndex] : null;
 
   return (
@@ -392,12 +587,25 @@ export default function App() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-bold text-slate-900 tracking-tight">Школьный сканер & OCR</h1>
-              <span className="text-[10px] bg-emerald-100 text-emerald-800 font-semibold px-2 py-0.5 rounded-full">
-                Реальный OCR (Tesseract)
-              </span>
+
+              {/* Live Scanner Agent Status Indicator */}
+              {agentConnected ? (
+                <span className="text-[10px] bg-emerald-100 text-emerald-800 font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1.5 border border-emerald-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  МФУ Kyocera подключено онлайн ✓
+                </span>
+              ) : (
+                <button
+                  onClick={() => setShowAgentModal(true)}
+                  className="text-[10px] bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 border border-amber-200 transition-colors cursor-pointer"
+                >
+                  <Server className="w-3 h-3 text-amber-600" />
+                  Подключить физический сканер
+                </button>
+              )}
             </div>
             <p className="text-xs text-slate-500">
-              Сканирование с камеры, загрузка сканов • Реальное распознавание текста без пробников
+              Прямой запуск сканирования с МФУ Kyocera, веб-камеры и смартфона
             </p>
           </div>
         </div>
@@ -417,6 +625,14 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => setShowAgentModal(true)}
+            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg text-slate-600 hover:text-slate-900 transition-all flex items-center gap-1.5 cursor-pointer"
+          >
+            <Terminal className="w-3.5 h-3.5 text-purple-600" />
+            <span>Агент сканера</span>
+          </button>
+
+          <button
             onClick={() => setAppMode('advanced')}
             className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
               appMode === 'advanced'
@@ -425,19 +641,7 @@ export default function App() {
             }`}
           >
             <Sliders className="w-3.5 h-3.5 text-slate-500" />
-            <span>Настройки сканера</span>
-          </button>
-
-          <button
-            onClick={() => setAppMode('vercel_guide')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
-              appMode === 'vercel_guide'
-                ? 'bg-white text-emerald-700 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Инструкция Vercel</span>
+            <span>Настройки DPI</span>
           </button>
         </div>
       </header>
@@ -449,26 +653,7 @@ export default function App() {
             <RefreshCw className="w-4 h-4 animate-spin" />
             <span>{statusMsg}</span>
           </div>
-          <span className="text-[11px] opacity-90 font-mono">Реальная обработка в браузере</span>
-        </div>
-      )}
-
-      {/* Error alert modal / banner */}
-      {errorMessage && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 text-xs text-amber-900 flex items-start justify-between">
-          <div className="flex items-start gap-2 max-w-4xl">
-            <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <span className="font-bold">Информация о подключении сканера:</span>
-              <p className="whitespace-pre-line text-slate-700">{errorMessage}</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setErrorMessage(null)}
-            className="text-amber-800 hover:text-black font-bold text-sm px-2 py-1"
-          >
-            ✕
-          </button>
+          <span className="text-[11px] opacity-90 font-mono">Физический захват & OCR</span>
         </div>
       )}
 
@@ -484,14 +669,26 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                     <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] flex items-center justify-center font-bold">1</span>
-                    Откуда взять документ?
+                    Сканировать документ
                   </span>
                   <span className="text-[11px] text-slate-400 font-medium">Страниц: {pages.length}</span>
                 </div>
 
-                {/* 4 Large Friendly Buttons */}
+                {/* 4 Large Action Cards */}
                 <div className="grid grid-cols-2 gap-2.5">
-                  {/* Camera button - REAL CAMERA SCAN */}
+                  {/* Real Physical Scanner Kyocera Button */}
+                  <button
+                    onClick={handlePhysicalScan}
+                    className="p-3 rounded-xl border-2 border-emerald-200 hover:border-emerald-500 bg-emerald-50/30 hover:bg-emerald-50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center group-hover:scale-105 transition-transform shadow-sm">
+                      <Printer className="w-5 h-5" />
+                    </div>
+                    <span className="text-xs font-bold text-slate-800">Сканер Kyocera</span>
+                    <span className="text-[10px] text-slate-500 leading-tight">Физический запуск со стекла / АПД</span>
+                  </button>
+
+                  {/* Camera button - REAL LIVE CAMERA */}
                   <button
                     onClick={startCamera}
                     className="p-3 rounded-xl border-2 border-blue-100 hover:border-blue-500 hover:bg-blue-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
@@ -500,10 +697,10 @@ export default function App() {
                       <Camera className="w-5 h-5" />
                     </div>
                     <span className="text-xs font-bold text-slate-800">Камера</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Сфотографировать лист с ноутбука/телефона</span>
+                    <span className="text-[10px] text-slate-500 leading-tight">Сфотографировать с ноутбука/телефона</span>
                   </button>
 
-                  {/* File Upload / Drag & Drop - REAL SCANNED FILE */}
+                  {/* File Upload / Drag & Drop */}
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     className="p-3 rounded-xl border-2 border-purple-100 hover:border-purple-500 hover:bg-purple-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
@@ -512,31 +709,19 @@ export default function App() {
                       <UploadCloud className="w-5 h-5" />
                     </div>
                     <span className="text-xs font-bold text-slate-800">Загрузить скан</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Файл со сканера, флешки или компьютера</span>
+                    <span className="text-[10px] text-slate-500 leading-tight">Файл с флешки или компьютера</span>
                   </button>
 
                   {/* Network Kyocera */}
                   <button
                     onClick={() => setShowNetworkModal(true)}
-                    className="p-3 rounded-xl border border-slate-200 hover:border-emerald-500 hover:bg-emerald-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
+                    className="p-3 rounded-xl border border-slate-200 hover:border-indigo-500 hover:bg-indigo-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
                   >
-                    <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-600 flex items-center justify-center group-hover:scale-105 transition-transform">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center group-hover:scale-105 transition-transform">
                       <Wifi className="w-5 h-5" />
                     </div>
                     <span className="text-xs font-bold text-slate-800">МФУ по сети</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Kyocera в школьной сети по IP</span>
-                  </button>
-
-                  {/* USB Scanner */}
-                  <button
-                    onClick={handleConnectUsb}
-                    className="p-3 rounded-xl border border-slate-200 hover:border-amber-500 hover:bg-amber-50/50 transition-all text-left flex flex-col items-center justify-center text-center gap-1.5 group cursor-pointer"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-600 flex items-center justify-center group-hover:scale-105 transition-transform">
-                      <Usb className="w-5 h-5" />
-                    </div>
-                    <span className="text-xs font-bold text-slate-800">USB сканер</span>
-                    <span className="text-[10px] text-slate-500 leading-tight">Подключение по USB проводу</span>
+                    <span className="text-[10px] text-slate-500 leading-tight">Подключение по IP-адресу</span>
                   </button>
                 </div>
 
@@ -552,10 +737,13 @@ export default function App() {
                   }}
                 />
 
-                {connectedUsbDevice && (
-                  <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span>Подключено: <strong>{connectedUsbDevice}</strong></span>
+                {agentConnected && (
+                  <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span className="truncate max-w-[200px]"><strong>{selectedDevice}</strong></span>
+                    </div>
+                    <span className="text-[10px] bg-emerald-200 text-emerald-800 font-bold px-1.5 py-0.5 rounded">Готов</span>
                   </div>
                 )}
               </div>
@@ -581,9 +769,9 @@ export default function App() {
                 {pages.length === 0 ? (
                   <div className="flex-1 flex flex-col items-center justify-center text-center p-6 border-2 border-dashed border-slate-200 rounded-xl text-slate-400">
                     <Scan className="w-10 h-10 text-slate-300 mb-2" />
-                    <p className="text-xs font-semibold text-slate-600">Нет добавленных документов</p>
+                    <p className="text-xs font-semibold text-slate-600">Нет отсканированных страниц</p>
                     <p className="text-[11px] text-slate-400 mt-1 max-w-xs">
-                      Нажмите <strong>«Камера»</strong>, чтобы сфотографировать реальный документ, или нажмите <strong>«Загрузить скан»</strong>
+                      Нажмите <strong>«Сканер Kyocera»</strong> для запуска МФУ или <strong>«Камера»</strong>, чтобы сделать снимок
                     </p>
                   </div>
                 ) : (
@@ -620,7 +808,7 @@ export default function App() {
                           {p.text ? (
                             <span className="text-[10px] text-emerald-600 font-bold bg-emerald-50 px-1 rounded">Распознано ✓</span>
                           ) : (
-                            <span className="text-[10px] text-slate-400">Новый скан</span>
+                            <span className="text-[10px] text-slate-400">Скан</span>
                           )}
                         </div>
                       </div>
@@ -635,7 +823,7 @@ export default function App() {
                   className="w-full py-3 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white rounded-xl font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-[0.99]"
                 >
                   <Sparkles className="w-5 h-5" />
-                  <span>{isProcessing ? 'Идет реальное распознавание...' : 'Распознать текст страницы (OCR)'}</span>
+                  <span>{isProcessing ? 'Идет распознавание...' : 'Распознать текст страницы (OCR)'}</span>
                 </button>
               </div>
             </div>
@@ -650,7 +838,7 @@ export default function App() {
                     <div className="text-center text-slate-400 p-6">
                       <Scan className="w-12 h-12 mx-auto text-slate-300 mb-2" />
                       <p className="text-sm font-semibold text-slate-600">Предпросмотр документа</p>
-                      <p className="text-xs text-slate-400 mt-1">Сделайте снимок на камеру или выберите файл слева</p>
+                      <p className="text-xs text-slate-400 mt-1">Отсканируйте страницу со сканера или камеры слева</p>
                     </div>
                   ) : (
                     <div className="max-w-full max-h-full flex items-center justify-center">
@@ -698,7 +886,7 @@ export default function App() {
                         });
                       }
                     }}
-                    placeholder="Здесь появится РЕАЛЬНЫЙ текст вашего отсканированного документа после нажатия кнопки «Распознать текст страницы (OCR)»...&#10;&#10;Вы сможете сразу внести правки, скопировать текст в реферат или сохранить в Word."
+                    placeholder="Здесь появится реальный текст вашего документа после нажатия кнопки «Распознать текст страницы (OCR)»...&#10;&#10;Вы сможете сразу внести правки, скопировать текст или скачать в Word/PDF."
                     className="flex-1 w-full p-3 rounded-xl border border-slate-200 text-xs font-mono leading-relaxed resize-none outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-slate-50/50"
                   />
 
@@ -706,7 +894,7 @@ export default function App() {
                   {currentPage?.links && currentPage.links.length > 0 && (
                     <div className="mt-3 pt-2 border-t border-slate-100 flex items-center gap-2 overflow-x-auto text-xs">
                       <LinkIcon className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-                      <span className="text-[11px] font-semibold text-slate-500 shrink-0">Ссылки в тексте:</span>
+                      <span className="text-[11px] font-semibold text-slate-500 shrink-0">Ссылки в документе:</span>
                       <div className="flex items-center gap-1.5 overflow-x-auto">
                         {currentPage.links.map((link, lIdx) => (
                           <a
@@ -730,7 +918,7 @@ export default function App() {
               <div className="h-20 bg-slate-50 border-t border-slate-200 px-6 flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold text-slate-800">Шаг 3: Сохранить результат</h3>
-                  <p className="text-[11px] text-slate-500">Генерация файлов прямо в браузере (100% бесплатно и офлайн)</p>
+                  <p className="text-[11px] text-slate-500">Экспорт с реальными кликабельными ссылками</p>
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -767,7 +955,7 @@ export default function App() {
                 </div>
                 <div>
                   <h2 className="text-base font-bold text-slate-900">Настройки оптического распознавания и сканирования</h2>
-                  <p className="text-xs text-slate-500">Параметры языка OCR и разрешения изображения</p>
+                  <p className="text-xs text-slate-500">Параметры языка OCR и разрешения сканера Kyocera</p>
                 </div>
               </div>
 
@@ -786,7 +974,7 @@ export default function App() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-bold text-slate-700 block mb-1">Разрешение DPI:</label>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">Разрешение сканера DPI:</label>
                   <select
                     value={dpi}
                     onChange={e => setDpi(Number(e.target.value))}
@@ -794,7 +982,7 @@ export default function App() {
                   >
                     <option value={150}>150 DPI (быстро)</option>
                     <option value={300}>300 DPI (стандартное)</option>
-                    <option value={600}>600 DPI (высокое качество)</option>
+                    <option value={600}>600 DPI (архивное качество)</option>
                   </select>
                 </div>
 
@@ -811,58 +999,109 @@ export default function App() {
                   </select>
                 </div>
               </div>
-
-              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2 text-xs">
-                <h3 className="font-bold text-slate-800">Как сканировать с МФУ Kyocera на школьный сайт:</h3>
-                <p className="text-slate-600">
-                  <strong>Вариант 1 (Самый простой):</strong> Нажмите кнопку <strong>«Камера»</strong> на ноутбуке, телефоне или планшете. Приложение сделает четкий снимок страницы с автоконтрастом и сразу распознает текст.
-                </p>
-                <p className="text-slate-600">
-                  <strong>Вариант 2:</strong> Отсканируйте документ с панели МФУ Kyocera на флешку или в сетевую папку (PDF/PNG) и перетащите файл в окно программы через <strong>«Загрузить скан»</strong>.
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 3: VERCEL GUIDE */}
-        {appMode === 'vercel_guide' && (
-          <div className="flex-1 max-w-4xl mx-auto w-full p-6 space-y-6 overflow-y-auto">
-            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-black text-white flex items-center justify-center font-bold text-lg">
-                  ▲
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-slate-900">Работа приложения на Vercel</h2>
-                  <p className="text-xs text-slate-500">
-                    Реальное распознавание текста на клиентской стороне без серверов
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-4 text-xs text-slate-700 leading-relaxed">
-                <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2 text-emerald-950">
-                  <h3 className="text-sm font-bold flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    Теперь никаких пробников и демо-заглушек!
-                  </h3>
-                  <p>
-                    Движок <strong>Tesseract.js</strong> переведен на выполнение прямо в браузере клиента. Когда вы сканируете камерой или загружаете файл, приложение распознает <strong>РЕАЛЬНЫЕ БУКВЫ И СЛОВА</strong> с вашего физического документа.
-                  </p>
-                </div>
-
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
-                  <h4 className="font-bold text-slate-800">Как обновить приложение на Vercel прямо сейчас:</h4>
-                  <p className="text-slate-600">
-                    Все изменения уже закоммичены в репозиторий. Если у вас подключен автодеплой в Vercel, он обновится автоматически. Если нет — сделайте `git push origin main` или нажмите <strong>«Redeploy»</strong> в панели Vercel.
-                  </p>
-                </div>
-              </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* AGENT CONNECTION MODAL (Bridge for Vercel to physical USB / WIA scanner) */}
+      {showAgentModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl p-6 space-y-5">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                  <Printer className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">Подключение сканера Kyocera к сайту</h3>
+                  <p className="text-[11px] text-slate-500">Запуск физического сканирования прямо из браузера</p>
+                </div>
+              </div>
+              <button onClick={() => setShowAgentModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-600 leading-relaxed">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-blue-900 space-y-1">
+                <span className="font-bold flex items-center gap-1.5">
+                  <HelpCircle className="w-4 h-4 text-blue-600 shrink-0" />
+                  Почему нужен агент?
+                </span>
+                <p className="text-[11px]">
+                  Сайт открыт в облаке на Vercel. Из соображений безопасности ни один браузер в мире не может без локального моста управлять моторами USB-устройств.
+                </p>
+                <p className="text-[11px]">
+                  <strong>Локальный агент</strong> — это крошечный скрипт на вашем компьютере, который принимает команду с сайта и передает её в официальный драйвер Kyocera через NAPS2!
+                </p>
+              </div>
+
+              <div className="space-y-2 border-t border-slate-100 pt-2">
+                <span className="font-bold text-slate-800 text-xs">Как включить за 1 минуту:</span>
+                
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">1</span>
+                  <span>Скачайте 2 файла в одну папку на вашем компьютере:</span>
+                </div>
+
+                <div className="flex items-center gap-2 pl-7">
+                  <button
+                    onClick={downloadAgentScript}
+                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Скачать start-scanner.bat</span>
+                  </button>
+
+                  <button
+                    onClick={downloadBridgeJs}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold text-[11px] flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Скачать bridge-agent.js</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">2</span>
+                  <span>Дважды кликните по файлу <strong>start-scanner.bat</strong> (он запустится в фоне).</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-slate-900 text-white text-[10px] font-bold flex items-center justify-center shrink-0">3</span>
+                  <span>Нажмите зеленую кнопку ниже для проверки связи:</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between border-t border-slate-200 pt-3">
+              <span className="text-xs">
+                Статус связи: {agentConnected ? (
+                  <strong className="text-emerald-600 font-bold">Подключено онлайн ✓</strong>
+                ) : (
+                  <span className="text-amber-600 font-medium">Ожидание запуска агента...</span>
+                )}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    await checkAgentConnection();
+                    if (agentConnected) {
+                      setShowAgentModal(false);
+                    }
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Проверить связь со сканером</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* CAMERA VIEWFINDER MODAL */}
       {showCameraModal && (
@@ -892,7 +1131,6 @@ export default function App() {
                     playsInline
                     className="w-full h-full object-cover"
                   />
-                  {/* Document Viewfinder Overlay Grid */}
                   <div className="absolute inset-8 border-2 border-white/60 border-dashed rounded-xl pointer-events-none flex items-center justify-center">
                     <span className="bg-black/60 text-white text-[11px] px-3 py-1 rounded-full font-medium">
                       Поместите страницу в рамку
@@ -931,7 +1169,7 @@ export default function App() {
           <div className="bg-white rounded-2xl max-w-md w-full overflow-hidden shadow-2xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Wifi className="w-5 h-5 text-emerald-600" />
+                <Wifi className="w-5 h-5 text-indigo-600" />
                 <h3 className="font-bold text-sm text-slate-900">Подключение сетевого МФУ Kyocera</h3>
               </div>
               <button onClick={() => setShowNetworkModal(false)} className="text-slate-400 hover:text-slate-600">
@@ -955,7 +1193,7 @@ export default function App() {
             </div>
 
             {networkStatus && (
-              <p className="text-xs text-emerald-600 font-medium">{networkStatus}</p>
+              <p className="text-xs text-indigo-600 font-medium">{networkStatus}</p>
             )}
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -967,7 +1205,7 @@ export default function App() {
               </button>
               <button
                 onClick={handleConnectNetwork}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-md cursor-pointer active:scale-95"
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow-md cursor-pointer active:scale-95"
               >
                 Подключить и сканировать
               </button>

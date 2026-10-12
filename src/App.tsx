@@ -629,36 +629,47 @@ while ($listener.IsListening) {
 
             $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
             $scanSucceeded = $false
+            $logs = @()
 
             if ($naps2) {
-                $argsList = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
+                Write-Host "[NAPS2] Executing scan via NAPS2 (WIA)..." -ForegroundColor Yellow
+                $args1 = @("-o", $tempFile, "--driver", "wia", "--dpi", $dpi, "--pagesize", "a4")
                 if ($deviceName -and -not $deviceName.Contains("kyocera-default")) {
-                    $argsList += @("--device", $deviceName)
+                    $args1 += @("--device", $deviceName)
                 }
-                if ($colorMode -eq "bw") { $argsList += @("--bitdepth", "1") }
-                elseif ($colorMode -eq "grayscale") { $argsList += @("--bitdepth", "8") }
-                else { $argsList += @("--bitdepth", "24") }
-                if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
-                else { $argsList += @("--source", "flatbed") }
+                if ($colorMode -eq "bw") { $args1 += @("--bitdepth", "1") }
+                elseif ($colorMode -eq "grayscale") { $args1 += @("--bitdepth", "8") }
+                else { $args1 += @("--bitdepth", "24") }
+                if ($source -eq "feeder") { $args1 += @("--source", "feeder") }
+                else { $args1 += @("--source", "flatbed") }
 
-                Write-Host "[SCAN] Running NAPS2 with device: $deviceName..." -ForegroundColor Yellow
-                Start-Process -FilePath $naps2 -ArgumentList $argsList -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                $out1 = & "$naps2" $args1 2>&1
+                $logs += "WIA: $out1"
+                Write-Host "  NAPS2 output: $out1" -ForegroundColor Gray
 
                 if (Test-Path $tempFile) {
                     $scanSucceeded = $true
-                } elseif ($deviceName) {
-                    Write-Host "[RETRY] Scanning with default device..." -ForegroundColor Yellow
-                    $retryArgs = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
-                    if ($colorMode -eq "bw") { $retryArgs += @("--bitdepth", "1") }
-                    elseif ($colorMode -eq "grayscale") { $retryArgs += @("--bitdepth", "8") }
-                    else { $retryArgs += @("--bitdepth", "24") }
-                    Start-Process -FilePath $naps2 -ArgumentList $retryArgs -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                } else {
+                    Write-Host "[NAPS2] Trying default profile..." -ForegroundColor Yellow
+                    $args2 = @("-o", $tempFile, "--dpi", $dpi)
+                    $out2 = & "$naps2" $args2 2>&1
+                    $logs += "Default: $out2"
+                    Write-Host "  NAPS2 output: $out2" -ForegroundColor Gray
+                    if (Test-Path $tempFile) { $scanSucceeded = $true }
+                }
+
+                if (-not $scanSucceeded) {
+                    Write-Host "[NAPS2] Trying TWAIN driver..." -ForegroundColor Yellow
+                    $args3 = @("-o", $tempFile, "--driver", "twain", "--dpi", $dpi)
+                    $out3 = & "$naps2" $args3 2>&1
+                    $logs += "TWAIN: $out3"
+                    Write-Host "  NAPS2 output: $out3" -ForegroundColor Gray
                     if (Test-Path $tempFile) { $scanSucceeded = $true }
                 }
             }
 
             if (-not $scanSucceeded) {
-                Write-Host "[WIA] Attempting scan via Windows WIA native interface..." -ForegroundColor Yellow
+                Write-Host "[WIA] Trying Windows Native WIA..." -ForegroundColor Yellow
                 try {
                     $dialog = New-Object -ComObject WIA.CommonDialog
                     $image = $dialog.ShowAcquireImage()
@@ -667,7 +678,8 @@ while ($listener.IsListening) {
                         if (Test-Path $tempFile) { $scanSucceeded = $true }
                     }
                 } catch {
-                    Write-Host "[WIA INFO] WIA Dialog: $($_.Exception.Message)" -ForegroundColor Gray
+                    $logs += "WIA: $($_.Exception.Message)"
+                    Write-Host "  WIA Error: $($_.Exception.Message)" -ForegroundColor Gray
                 }
             }
 
@@ -688,9 +700,10 @@ while ($listener.IsListening) {
                 $res.Close()
                 Write-Host "[SCAN OK] Scan completed! Sent to website successfully!" -ForegroundColor Green
             } else {
-                $msg = "Dlya zapuska kareki skanera trebuetsya besplatnaya programma NAPS2 (15 MB). Skachayte ee s sayta: https://www.naps2.com/ (ili vstavte kabel USB i vkluchite pitanie MFP)."
-                Write-Host "[SCAN FAILED] $msg" -ForegroundColor Red
-                $errObj = @{ success = $false; error = $msg }
+                $logSummary = ($logs -join "; ").Trim()
+                $errorMsg = "Zakroyte otkrytoe okno programmy NAPS2 (ono zakhvatilo USB port skanera). Proverte kabel Kyocera. Log: $logSummary"
+                Write-Host "[SCAN FAILED] $errorMsg" -ForegroundColor Red
+                $errObj = @{ success = $false; error = $errorMsg }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
                 $res.StatusCode = 500
                 $res.ContentType = "application/json; charset=utf-8"

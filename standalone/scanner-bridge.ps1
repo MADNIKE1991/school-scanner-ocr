@@ -13,6 +13,7 @@ function Find-Naps2 {
     $paths = @(
         "C:\Program Files\NAPS2\NAPS2.Console.exe",
         "C:\Program Files (x86)\NAPS2\NAPS2.Console.exe",
+        "C:\Program Files\NAPS2\NAPS2.exe",
         "$env:LOCALAPPDATA\Programs\NAPS2\NAPS2.Console.exe",
         "$env:LOCALAPPDATA\NAPS2\NAPS2.Console.exe",
         "$env:APPDATA\NAPS2\NAPS2.Console.exe",
@@ -25,6 +26,13 @@ function Find-Naps2 {
     }
     $cmd = Get-Command "naps2.console" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
+    $cmd2 = Get-Command "naps2" -ErrorAction SilentlyContinue
+    if ($cmd2) {
+        $dir = Split-Path $cmd2.Source
+        $c = Join-Path $dir "NAPS2.Console.exe"
+        if (Test-Path $c) { return $c }
+        return $cmd2.Source
+    }
     return $null
 }
 
@@ -43,11 +51,19 @@ Write-Host "================================================================" -F
 Write-Host "     KYOCERA SCANNER AGENT (Windows Native Bridge)" -ForegroundColor Green
 Write-Host "================================================================" -ForegroundColor Cyan
 if ($naps2) {
-    Write-Host "[OK] NAPS2 Scanner Driver found: $naps2" -ForegroundColor Green
+    Write-Host "[OK] NAPS2 CLI found at: $naps2" -ForegroundColor Green
+    try {
+        $devList = & "$naps2" --list 2>&1
+        Write-Host "Connected scanner devices:" -ForegroundColor Cyan
+        $devList | ForEach-Object { Write-Host "  * $_" -ForegroundColor White }
+    } catch {}
 } else {
-    Write-Host "[WARN] NAPS2 not found. Bridge will use Windows WIA driver fallback." -ForegroundColor Yellow
-    Write-Host "       For best quality, install free NAPS2 from: https://www.naps2.com/" -ForegroundColor Gray
+    Write-Host "[WARN] NAPS2.Console.exe not found. Windows WIA fallback will be used." -ForegroundColor Yellow
 }
+Write-Host ""
+Write-Host "NOTE: If the NAPS2 graphical window is open, PLEASE CLOSE IT" -ForegroundColor Yellow
+Write-Host "      so it does not lock the scanner USB port exclusively!" -ForegroundColor Yellow
+Write-Host ""
 Write-Host "[OK] Bridge listening on: http://localhost:$port/" -ForegroundColor Green
 Write-Host "Now open: https://school-scanner-ocr.vercel.app" -ForegroundColor Yellow
 Write-Host "Status: READY - Waiting for scan button click on website..." -ForegroundColor Green
@@ -78,11 +94,11 @@ while ($listener.IsListening) {
             $devices = @()
             if ($naps2) {
                 try {
-                    $rawList = & "$naps2" --list
+                    $rawList = & "$naps2" --list 2>&1
                     $i = 0
                     foreach ($line in ($rawList -split "`r?`n")) {
                         $trimmed = $line.Trim()
-                        if ($trimmed) {
+                        if ($trimmed -and -not $trimmed.StartsWith("Error")) {
                             $isTwain = $trimmed.ToLower().Contains("twain")
                             $devices += @{
                                 id = "dev-$i"
@@ -135,41 +151,52 @@ while ($listener.IsListening) {
             $source = if ($bodyObj.source) { $bodyObj.source } else { "flatbed" }
 
             $tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "kyocera_scan_$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()).png")
-
             $scanSucceeded = $false
+            $logs = @()
 
-            # Method A: Use NAPS2 if available
+            # Method 1: NAPS2 with WIA
             if ($naps2) {
-                $argsList = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
+                Write-Host "[NAPS2] Executing scan via NAPS2 (WIA)..." -ForegroundColor Yellow
+                $args1 = @("-o", $tempFile, "--driver", "wia", "--dpi", $dpi, "--pagesize", "a4")
                 if ($deviceName -and -not $deviceName.Contains("kyocera-default")) {
-                    $argsList += @("--device", $deviceName)
+                    $args1 += @("--device", $deviceName)
                 }
-                if ($colorMode -eq "bw") { $argsList += @("--bitdepth", "1") }
-                elseif ($colorMode -eq "grayscale") { $argsList += @("--bitdepth", "8") }
-                else { $argsList += @("--bitdepth", "24") }
-                if ($source -eq "feeder") { $argsList += @("--source", "feeder") }
-                else { $argsList += @("--source", "flatbed") }
+                if ($colorMode -eq "bw") { $args1 += @("--bitdepth", "1") }
+                elseif ($colorMode -eq "grayscale") { $args1 += @("--bitdepth", "8") }
+                else { $args1 += @("--bitdepth", "24") }
+                if ($source -eq "feeder") { $args1 += @("--source", "feeder") }
+                else { $args1 += @("--source", "flatbed") }
 
-                Write-Host "[SCAN] Running NAPS2 with device: $deviceName..." -ForegroundColor Yellow
-                $proc = Start-Process -FilePath $naps2 -ArgumentList $argsList -Wait -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+                $out1 = & "$naps2" $args1 2>&1
+                $logs += "WIA: $out1"
+                Write-Host "  NAPS2 output: $out1" -ForegroundColor Gray
 
                 if (Test-Path $tempFile) {
                     $scanSucceeded = $true
-                } elseif ($deviceName) {
-                    # Retry without specific device name to let NAPS2 pick default WIA scanner
-                    Write-Host "[RETRY] Device not found by exact name. Scanning with default scanner..." -ForegroundColor Yellow
-                    $retryArgs = @("-o", $tempFile, "--dpi", $dpi, "--pagesize", "a4")
-                    if ($colorMode -eq "bw") { $retryArgs += @("--bitdepth", "1") }
-                    elseif ($colorMode -eq "grayscale") { $retryArgs += @("--bitdepth", "8") }
-                    else { $retryArgs += @("--bitdepth", "24") }
-                    Start-Process -FilePath $naps2 -ArgumentList $retryArgs -Wait -NoNewWindow -ErrorAction SilentlyContinue
+                } else {
+                    # Method 2: NAPS2 with default profile
+                    Write-Host "[NAPS2] Trying default profile..." -ForegroundColor Yellow
+                    $args2 = @("-o", $tempFile, "--dpi", $dpi)
+                    $out2 = & "$naps2" $args2 2>&1
+                    $logs += "Default: $out2"
+                    Write-Host "  NAPS2 output: $out2" -ForegroundColor Gray
+                    if (Test-Path $tempFile) { $scanSucceeded = $true }
+                }
+
+                if (-not $scanSucceeded) {
+                    # Method 3: NAPS2 with TWAIN
+                    Write-Host "[NAPS2] Trying TWAIN driver..." -ForegroundColor Yellow
+                    $args3 = @("-o", $tempFile, "--driver", "twain", "--dpi", $dpi)
+                    $out3 = & "$naps2" $args3 2>&1
+                    $logs += "TWAIN: $out3"
+                    Write-Host "  NAPS2 output: $out3" -ForegroundColor Gray
                     if (Test-Path $tempFile) { $scanSucceeded = $true }
                 }
             }
 
-            # Method B: Fallback to Windows Native WIA COM if NAPS2 was not installed or failed
+            # Method 4: Windows Native WIA COM Fallback
             if (-not $scanSucceeded) {
-                Write-Host "[WIA] Attempting scan via Windows WIA native interface..." -ForegroundColor Yellow
+                Write-Host "[WIA] Trying Windows Native WIA..." -ForegroundColor Yellow
                 try {
                     $dialog = New-Object -ComObject WIA.CommonDialog
                     $image = $dialog.ShowAcquireImage()
@@ -178,7 +205,8 @@ while ($listener.IsListening) {
                         if (Test-Path $tempFile) { $scanSucceeded = $true }
                     }
                 } catch {
-                    Write-Host "[WIA INFO] WIA Dialog status: $($_.Exception.Message)" -ForegroundColor Gray
+                    $logs += "WIA: $($_.Exception.Message)"
+                    Write-Host "  WIA Error: $($_.Exception.Message)" -ForegroundColor Gray
                 }
             }
 
@@ -199,9 +227,10 @@ while ($listener.IsListening) {
                 $res.Close()
                 Write-Host "[SCAN OK] Scan completed! Sent to website successfully!" -ForegroundColor Green
             } else {
-                $msg = "Dlya zapuska kareki skanera trebuetsya besplatnaya programma NAPS2 (15 MB). Skachayte ee s sayta: https://www.naps2.com/ (ili vstavte kabel USB i vkluchite pitanie MFP)."
-                Write-Host "[SCAN FAILED] $msg" -ForegroundColor Red
-                $errObj = @{ success = $false; error = $msg }
+                $logSummary = ($logs -join "; ").Trim()
+                $errorMsg = "Zakroyte otkrytoe okno programmy NAPS2 (ono zakhvatilo USB port skanera). Proverte kabel Kyocera. Log: $logSummary"
+                Write-Host "[SCAN FAILED] $errorMsg" -ForegroundColor Red
+                $errObj = @{ success = $false; error = $errorMsg }
                 $errBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json $errObj))
                 $res.StatusCode = 500
                 $res.ContentType = "application/json; charset=utf-8"
